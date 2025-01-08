@@ -1,0 +1,95 @@
+'Version info
+' v1.0  ' Initial script
+' v1.1  ' ROFD added
+
+
+'================== DEBUGGING AND DEVELOPMENT NEEDED ===========================================================
+'   * Look at peak/trough search paramters
+'       - 0.25 RMS seems to work but its pretty much arbritrary
+
+'================== Global constant and variable declarations  =================================================
+
+' ----------------------------------------------------------------------
+func peakfind%(vw%,wch%,evch%,sw,wd,hl%,hy,db%)   ' Find peaks preceeding events in event channel (view, waveform to search, event channel, search window, min width of peak, hysteresis and whether high (1) or low (0) going, debug mode (1 is on)
+Var i%;                     ' Count of events
+var st, et, pkt;            ' Start and end times for searches, time of peaks
+Var vwtmp% := view();       ' View when function called
+var pkev%;                  ' Channel for peak events
+Var pk;                     ' Peak (or trough) value
+Var er%;                    ' Error code
+var mkcode%[4];             ' Array for marker codes
+Var maxt := Maxtime(wch%);  ' Max time in channel
+var c1t,c1lab$, c1s%;       ' Existing cursor 1 time, label and style
+View(vw%);
+pkev% := createvch%();
+if pkev% < 0 then return pkev%;   endif
+if db% = 1 then    '###### DEBUG
+    PrintLog("\nPeak/ trough find\n=================\n\nFile: %s\nChannel: %d: %s\n\nIndex\tSt\tEt\tth\ttime\n",WindowTitle$(),wch%,ChanTitle$(wch%));    
+endif
+for i% := 1 to MemGetItem(evch%,0) do
+    st := MemGetItem(evch%,i%);
+    et := st + sw;
+    if et > Maxtime(wch%) then et := maxt;   endif
+    pk := ChanMeasure(wch%,11,st,et) / 4;   ' 1/4 RMS within window
+    pkt := ChanSearch(wch%,5 - hl%,st,maxt,pk,hy,wd,1);  ' search whole file or will effectively truncate wd at et - st
+    if MemGetItem(evch%,i%,mkcode%[]) < 0 then 
+        Message("Marker read error|Error in reading marker %d in event channel %d" + queinf$(vw%,wch%),i%,evch%); 
+    else
+        docase
+            case pkt < 0 then Message("Peak/ trough find error|Error in peak/ trough search between %.4f and %.4f"+ queinf$(vw%,wch%),st,et); 
+            case pkt > et then
+                c1t := Cursor(1,pkt);   ' Get current cursor 1 position (or -1 if doesn't exist)
+                if c1t > 0 then c1s% := CursorLabel(c1lab$,1);    CursorLabel(4,1,"F. Peak");    ' Move cursor 0 to peak time, record its existing label and set new one to "F. Peak"
+                else CursorNew(pkt,1);   
+                endif
+                DlgCreate("Peak/ trough find error");
+                DlgText("Peak/ trough found for rep " + str$(i%) + " but outside the defined search range",1,1);
+                DlgText(queinf$(vw%,wch%),4,2);
+                DlgText("Onset:",4,4); DlgText(str$(st),22,4);
+                DlgText("End of search range:",4,4.5);    DlgText(str$(et),22,4.5);
+                DlgText("Peak found at:",4,5);  DlgText(str$(pkt),22,5); 
+                DlgText("Set anyway?",4,6);
+                DlgGroup("",4,7,47,2);
+                DlgText("NOTE: moving cursor will not alter the time set, this can be\ndone with the manual checking procedure\n",4.5,7.5);
+                DlgButton(0,"Yes"); DlgButton(1,"No");
+                Draw(st - 2,pkt + 7);
+                ChanHide(-2);   ChanShow(wch%); Optimise(wch%);
+                DlgAllow(4);    ' Can move and resize window
+                If DlgShow() = 0 then MemSetItem(pkev%,0,pkt,mkcode%[]);    endif
+                If c1t > 0 then ' If there already was a cursor 1, put it back how we found it
+                    cursor(1,c1t);
+                    If c1s% < 4 then cursorlabel(4,1,c1lab$); else CursorLabel(c1s%,1);    endif   ' Restore previous cursor labelling
+                endif
+            else MemSetItem(pkev%,0,pkt,mkcode%[]);
+        endcase
+    endif
+    if db% = 1 then PrintLog("%d\t%.4f\t%.4f\t%.4f\t%.4f\n",i%,st,et,pk,pkt);    endif   '###### DEBUG
+next
+View(vwtmp%);   ' Restore to view at call
+return pkev%;    
+end
+' ----------------------------------------------------------------------
+func rofd(vw%,ch%,t1,t2,t1v,t2v,per1,per2,hy,minx,hl%,dr%);   'Rate of force development 
+    '(view, channel, start and end times, values at t1 and t2, lower and upper percentile, hysteresis and minimum time outside threshold, whether high (1) or low (0) going, ROFD (0) or RORelax (1))
+Var th1t, th2t; ' Times of thresholds 1 and 2
+Var th1 := (t2v - t1v) * (per1 / 100) + t1v;    ' Threshold 1 
+Var th2 := (t2v - t1v) * (per2 / 100) + t1v;    ' Threshold 2
+Var rofd;       ' Rate of force development
+Var drst$[2];   drst$[0] := "ROFD"; drst$[1] := "RORelax";  ' Label of analysis type
+hl% := abs(hl% - dr%);  ' If rate or relaxation, invert high/ low
+if t2 > view(vw%).maxtime(ch%) then t2 := view(vw%).maxtime(ch%);   endif   ' If would search beyond end of channel
+th1t := view(vw%).ChanSearch(ch%,8 - hl%,t1,t2,th1,hy,minx);
+th2t := view(vw%).ChanSearch(ch%,8 - hl%,t1,t2,th2,hy,minx);
+if (th1t >= 0 and th2t >= 0) then    ' If got times for both thresholds
+    rofd := view(vw%).ChanMeasure(ch%,3,th1t,th2t,er%);
+    if er% = 0 then 
+        Message("%s calculation error|Error in measuring %s between %g and %g s\n\nThreshold 1: %g at %g s\nThreshold 2: %g at %g s\n\n"+ queinf$(vw%,ch%) + "\n\n",drst$[dr%],drst$[dr%],t1,t2,th1,th1t,th2,th2t);
+        return -1 
+    else 
+        return rofd; 
+    endif
+else
+    Message("%s threshold error|Error in finding thresholds for %s calculation\n\nSearch range %g to %g\nThreshold 1: %g (at %g s)\nThreshold 2: %g (at %g s)\n\n"+ queinf$(vw%,ch%) + "\n\n",drst$[dr%],drst$[dr%],t1,t2,th1,th1t,th2,th2t);
+    return -2;
+endif
+end

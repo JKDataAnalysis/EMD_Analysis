@@ -1,0 +1,90 @@
+' Script functions to conduct TKEO transforms of EMG data
+'Version info
+' v1.0      - Functions seperated from EMD_Calc script EMD_Calv_v2_3_0
+
+'================== DEBUGGING AND DEVELOPMENT NEEDED ===========================================================
+
+' * Filter settings need to be added to the settings dialogue
+' * Look at filtering. Can FIR filters give you steep enough filters, especially for the high-pass
+'       - Can this be aided by creating filters with a higher number of coefficients?
+' * Why does chanscale on createtkeo need to be set to that value- how is the optimum determined?
+' * Work on finding onsests!
+
+'================== Global variables ===========================================================
+Const arraymax%:= 4000;			                ' Maximum size of array to read/write blocks of data in	
+
+
+' ----------------------------------------------------------------------
+Func dotkeo(vw%,ch%,st,et); 'Do TKEO transform on passed channel (View and channel to transform, start and end times);
+var hpfltch%, rwtkeoch%, lptkeoch%;     ' Handle of HP filtered, TKEO transformed and LP filtered TKEO channels
+
+hpfltch% := firfiltch%(vw%,ch%,st,et,3,22,31,0);  ' >>>>> ADD THESE VALUES TO THE SETTINGS DIALOGUE
+if hpfltch% > 0 then 
+    ChanSelect(hpfltch%,1); ChanTitle$(hpfltch%,"HPFiltEMG");' Add created channel to list for deletion when we tidy up
+else
+    return -1;    
+endif
+rwtkeoch% := createtkeo%(vw%,hpfltch%,st,et);
+if rwtkeoch% > 0 then 
+    ChanSelect(rwtkeoch%,1); ChanTitle$(rwtkeoch%,"TKEO_raw");' Add created channel to list for deletion when we tidy up
+else
+    return -2;    
+endif
+lptkeoch% := firfiltch%(vw%,rwtkeoch%,st,et,2,25,50,0);  ' >>>>> ADD THESE VALUES TO THE SETTINGS DIALOGUE
+if lptkeoch% > 0 then 
+    ChanSelect(lptkeoch%,1); ChanTitle$(lptkeoch%,"LP_TKEO");' Add created channel to list for deletion when we tidy up
+else
+    return -1;    
+endif
+ChanProcessAdd(lptkeoch%,0);  ' Rectify channel
+end
+
+' ---------------------------------------------------------------------   
+Func createtkeo%(vw%,ch%,st,et);  ' Create a channel of TKEO transform of passed channel (View and channel to transform, start and end times)
+Var t1,t2;  ' Start and end times of analysis
+Var pch%;   ' Processing channel
+Var bins;   ' Binsize of passed channel
+Var vwtmp% := View();    View(vw%);
+    
+bins := BinSize(ch%);
+pch% := ChanNew(0,1,0,bins);
+if pch% <1 then
+    Message("Channel creation error!|Unable to create a channel to write TKEO data to");
+    Return -1;
+else
+    ChanScale(pch%,0.01);   '0.00001);   '>>>> WHY DOES THIS NEED TO BE SET TO THIS????? THERE WAS A REASON BUT I CAN NO LONGER REMEMBER IT!!!
+    t1 := st;
+    repeat  ' Process all channel in chunks of size arraymax%
+        t2 := t1 + bins * arraymax%;
+        if t2 > Maxtime(ch%) then t2 := Maxtime(ch%);  endif
+        if tkeosums(ch%,pch%,t1,t2,bins) < 0 then break;    endif
+        t1 := t2 - bins * 2; '- bins*2 as misses last element of array
+    until t2 >= Maxtime(ch%);
+    view(vwtmp%);   ' Restore view to that set when called
+    return pch%;
+endif
+end    
+' ---------------------------------------------------------------------
+Func tkeosums(rch%,wch%,t1,t2,b);   ' Procedure to read in an array of data from a channel, conduct TKEO analysis and 
+    '   write it to another channel (Channel to read from and to, start and end times for read, binsize of read channel)
+    Var rn%;                ' Number of data points read into array 
+    Var r[arraymax%];       ' Array to read data into
+    Var tk[arraymax%];      ' Array for Teager-Kaiser data
+    Var n%;                 ' Looping variable
+    Var er%;                ' Error codes
+    Var er$;                ' String for error messages
+    
+    rn% := ChanData(rch%,r[],t1,t2);	' Read in data 
+    If rn% <1 Then
+        Message("Data read error!|Data read error in channel %d\nbetween %g and %g seconds",rch%,t1,t2);	
+        return -1;
+    endif
+    For n%:= 1 to rn%-2 do
+        tk[n%]:= pow(r[n%],2)-r[n%+1]*r[n%-1];
+    next    
+    er% := ChanWriteWave(wch%,tk[:rn%-1],t1);
+    If er% < 0 then 
+        er$:= "Channel write error!|Failed to write to channel at "+str$(t1-b)+ " seconds\nAttempting to write "+ str$(rn%)+" data points\n\nAbort analysis?";
+        return -2;
+    endif
+end

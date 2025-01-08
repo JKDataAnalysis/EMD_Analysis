@@ -1,0 +1,17 @@
+EMD_Calc_v3_2_1beta.s2s
+Force
+EMG
+3,0,0,1,0.5,0,5,1,8,24,8.5,0.2,0.05,1,0,0.01,85,8,24,1,5,20,0,1,25,75,0,0.01,8,0
+Item
+File
+Channel
+Rep
+F onset t (s)
+Diff to script (ms)
+F at Onset (N)
+Peak/trough t
+Diff to script (ms)
+F at peak (N)
+Relative peak (N)
+ROFD (N/s)
+RORelax (N/s)

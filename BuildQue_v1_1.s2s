@@ -1,0 +1,226 @@
+' Script functions to build an array of time views for analysis
+'Version info
+' v1.0      - Functions seperated from EMD_Calc script
+'================== DEBUGGING AND DEVELOPMENT NEEDED ===========================================================
+
+'================== Global variables ===========================================================
+Var timelist%[maxtmv%];         ' Array for time view handles
+
+
+Func choosev%(def%)	'Choose the time view to be used (default)
+Var chosenv%;			        ' Variable to return item selected in dialogue to (default to currently set view)
+Var i%;                         ' Looping variable
+var vset%;                      ' View currently set
+Var timetitle$[maxtmv%];	    ' Array for time view titles
+Var chok%;                      ' Flag if channels succesfully selected
+Var new%;                       ' Handle of new file returned by getfile
+Viewlist(timelist%[],1);	' Get list of time views already open
+For i% := 1 to timelist%[0] Do	' Fill an array with time view titles
+    if checkfile(timelist%[i%],0) = 0 then 
+        ArrConst(timelist%[i%:],timelist%[i%+1:]);   'Remove from list
+        timelist%[0] -=1;   ' Take 1 off the count
+    else
+        timetitle$[i%-1]:= View(timelist%[i%]).Windowtitle$();    ' (timelist%[0] = No of time views)
+        if def% > 0 and timelist%[i%] = def% then chosenv% := i%-1;  endif   ' Set to default (i% - 1 since timelist[0] = No of time views but timetile$ starts list at index 0)
+    endif		
+Next
+DlgCreate("Select time view",0,0,0,0);
+DlgList(1,"",timetitle$[],(timelist%[0]),4,2);
+DlgButton(2,"&Set channels",0,25,2);
+DlgButton(3,"Sh&ow",shwbtn%,42,2);
+DlgButton (1,"Open file",getfile%,2,4);
+DlgButton(0,"&Cancel",0,35,4);
+DlgAllow(0x3ff,0,chngvw%);
+If DlgShow(chosenv%) = 2 then chok% := getch%(timelist%[chosenv% + 1]); endif 'Set channel clicked (returns selected view (+ 1 since item 0 of timelist is the number of items returned by viewlist)
+return chok%;
+End;  
+' ---------------------------------------------------------------------
+func tlbrchoosev%() ' Jumping off point for menu call
+    choosev%(0);
+end;
+' ---------------------------------------------------------------------
+func chngvw%(cg%)   ' Itesm on choosev dialogue changed
+
+Var tmv%[maxtmv%];  ' Array for time view handles
+if Viewlist(tmv%[],1) = 0 then ' No time views open
+    DlgEnable(0,1,-2); 
+else
+    DlgEnable(1,1,-2);  
+endif
+return 1;
+end;
+' ----------------------------------------------------------------------
+func shwbtn%()  ' Show button clicked on choosev dialogue
+Var i%;                                 ' Looping variable
+Var waves%[maxchan%+1]; 	            ' Dummy array for waveform channels +1 to allow for 0 index being used for number of channels
+Var vw% := timelist%[dlgvalue(1) + 1];  ' Time view selected in dialogue
+waves%[0] := Chanlist(waves%[]);        ' fill arary with all channel numbers
+if viewkind(vw%) = 0 then
+    FrontView(vw%);    
+    For i% := 0 to waves%[0]-1 do           ' make all included channels visible and optimise to show everything
+        ChanShow(waves%[i%+1]); 
+        Draw(0,maxtime());
+        Optimise(waves%[i%+1]);
+    Next
+    
+else
+    Message("View error|Selected view is not a time view");
+endif
+return 1;
+end;
+' ----------------------------------------------------------------------
+Func getfile%()
+Var vw%;        ' Handle of view opened
+Var i%;         ' Looping variable
+vw% := FileOpen("",0,1);
+If vw% <= 0 Then    
+    Message ("File open error!|No file opened!");
+    Return 1;
+else
+    if checkfile(vw%,1) > 0 then
+        FilePathSet(FileName$(1) + FileName$(2),0,0);
+        choosev%(vw%);  
+        return 0; ' Close and reopen dialogue box so file list is repopulated
+    else
+        return 1;
+    endif
+EndIf    
+End;
+' ----------------------------------------------------------------------
+Func anallst%()   ' Edit analysis list
+var i%,j%;                      ' Looping variables
+const colh := 20, colw := 75;   ' Height and width of columns
+Var y%, col;                    ' y position in dialogue and column offset
+Var delflg%[maxtmv%];           ' Flags of items for removal (0: keep, 1: remove)
+var clsv%[maxtmv%], clsn%;      ' Array of views flagged for closure, number of items flagged
+var edt%, all%;                 ' Edit and all flags
+var dlgh;                       ' Height of dlg box
+if quen% > colh then dlgh := colh + 3; else dlgh := quen% + 3;    endif;  'Position edit box at bottom of dialogue box
+
+DlgCreate("Analysis list",0,0,0,dlgh);
+for i% := 0 to quen% - 1 do
+    if i% mod colh = 0 then 
+        if i% >= colh then ' Not the first column
+            col += colw;
+        endif
+        DlgText("File",col + 2,1); DlgText("Force",col + 22,1); DlgText("EMG",col + 28,1);    
+        DlgText("Start",col + 39,1);  DlgText("End",col + 47,1);
+        DlgText("reps",col + 57,1);
+        y% := 2;
+    else
+        y% += 1;
+    endif
+    DlgText(View(que%[i%][0]).Windowtitle$(),col + 2,y%,20);
+    DlgText(str$(que%[i%][1]),col + 22,y%);
+    DlgText(str$(que%[i%][2]),col + 28,y%);
+    DlgText(str$(stend[i%][0],6),col + 39,y%);    
+    DlgText(str$(stend[i%][1],6),col + 47,y%);    
+    DlgText(str$(que%[i%][3],2),col + 57,y%); 
+    DlgCheck(i% + 2,"Delete",col + 63,y%);
+next
+DlgCheck(1,"All",col + 63,1);
+DlgButton(1,"Delete selected");
+DlgButton(2,"Edit on",edbtn%,2,dlgh - 0.5);
+DlgAllow(0x3ff,0,edlist%);
+if DlgShow(all%,delflg%[]) = 1 then 
+    ArrConst(clsv%[],que%[][0]);      ' Copy array of all channels to delch%
+    ArrMul(clsv%[],delflg%[]);      ' Set flagged items to zero from delch%
+    clsn% := arrsum(delflg%[]);      ' set to number of channels flagged
+    ArrSub(delflg%[:quen%],1);   abs(delflg%[:quen%]);  ' Invert flag array
+    ArrMul(que%[][0],delflg%[]);    ' Set flagged items to zero from que%
+    for i% := 0 to quen% - 1 do        ' remove zeroed items
+        if que%[j%][0] = 0 then 
+            ArrConst(que%[j%:][],que%[j% + 1:][]);  ' Move everything down one
+            ArrConst(stend[j%:][],stend[j% + 1:][]);        
+            quen% -= 1;  'and take 1 of the number of values
+        else
+            j%+=1;  ' increment number of items removed
+        endif
+    next
+    clsque%(clsv%[]); 
+endif 
+Return 0;
+End;               
+' ----------------------------------------------------------------------
+func edbtn%();
+var i%; ' Looping variable
+var delcnt%;    ' No of items flagged for deletion
+DlgEnable(abs(DlgEnable(1)-1),1); 'Toggle 'all' check box
+for i% := 2 to quen% + 1 do    ' Toggle enabled status of qued items check boxes
+    DlgEnable(DlgEnable(1),i%);    ' If 'all' is enabled, enable the individual check boxes to
+next;   
+DlgEnable(0,-1); 'Default to delete button not enabled
+if DlgEnable(1) then ' If all (and therefore editing) enabled
+    DlgValue$(-2,"Edit off");   
+    i% := 1;
+    while i% <= quen% and delcnt% = 0 do 
+        if DlgValue(i% + 1) = 1 then delcnt% += 1 endif 
+        i% += 1;
+    wend
+    if delcnt% > 0 then ' If at least one box checked
+        DlgEnable(1,-1); 
+    endif
+else
+    DlgValue$(-2,"Edit on");   
+endif
+return 1
+end
+' ----------------------------------------------------------------------
+func edlist%(cg%)   ' Handles setting changes in que editing dialogue
+var i%; ' Looping variable
+var delcnt%;    ' No of items flagged for deletion
+docase
+    case cg% = 0 then   for i% := 2 to quen% + 1 do    DlgEnable(0,i%);    next;   DlgEnable(0,-1,1); 'Start with checkboxes and delete selected button disabled
+    case cg% = 1 then   for i% := 2 to quen% + 1 do    DlgValue(i%,DlgValue(1));    next;  ' Set all on/ off
+    else if DlgValue(1) = 1 then DlgValue(1,0); endif   ' If check all is on and other values are changed then turn it off
+endcase
+DlgEnable(0,-1); 'Default to delete button not enabled
+if DlgEnable(1) then ' If all (and therefore editing) enabled
+    i% := 1;
+    while i% <= quen% and delcnt% = 0 do 
+        if DlgValue(i% + 1) = 1 then delcnt% += 1 endif 
+        i% += 1;
+    wend
+    if delcnt% > 0 then ' If at least one box checked
+        DlgEnable(1,- 1); 
+    endif
+endif
+return 1;
+end;
+' ----------------------------------------------------------------------
+func clsque%(cvw%[]);   ' Close unused views (Array of time qued items to delete (index 0 equals number flagged))
+var i%,j%,k%;           ' Looping variables
+var btn%;               ' Button clicked
+var clser%;             ' No. files NOT successfully closed
+DlgCreate("Close unused files");
+DlgText("Should files removed from list also be closed?",1,1);
+DlgText("(Files still included elsewhere in list will be left open)",1,2);
+DlgButton(0,"Cancel",0,33,4);
+DlgButton(1,"Close file(s)",0,1,4);
+DlgButton(2,"Leave open",0,16,4);
+btn%:=DlgShow();
+docase
+    case btn%=0 then return 1;
+    case btn%=1 then 
+    for i% := 1 to cvw%[0] do   ' remove duplicates and still used views
+        ArrSort(cvw%[1:],1); 
+        for i% := 1 to cvw%[0]-1 do    ' remove duplicates
+            if cvw%[i%] = cvw%[i%+1] then 
+                ArrConst(cvw%[i%:],cvw%[i%+1:]);  ' Move everything down one
+                cvw%[0]-=1;  'and take 1 of the number of values
+            endif
+        next
+        for k% := 1 to cvw%[0] do    ' remove items from close list that are still used
+            for j% := 0 to quen% - 1 do    ' remove zeroed items
+                if cvw%[k%] = que%[j%][0] then    cvw%[k%] := 0; cvw%[0] -=1; endif
+            next
+        next
+    next
+    for i% := 1 to cvw%[0] do   ' Close views still listed
+        view(cvw%[i%]); ' This and fileclose are separated (rather than view().fileclose) as, if you try to close the only time view open, the script crashed with a view if of wrong type error 
+        clser% += FileClose(0,-1);
+    next
+    if viewkind() < 0 then view(LogHandle());   endif;  ' If have closed all time views, switch active view to log window
+    if clser%>0 then Message("File close error|THERE WAS A PROBLEM CLOSING %d FILE(S)",clser%);   endif
+endcase
+end;

@@ -1,0 +1,115 @@
+' Script functions to open/ read/ save settings (text) file
+'Version info
+' v1.0      ' Separated from EMD_Calc
+' v1.1      ' File header checking moved to a separate function and modified so that the script file type is ignored to avoid compatibility issues between versions of Windows that include this (Win 7 Enterprise) and those that don't (Win 7 Home)
+
+'================== DEBUGGING AND DEVELOPMENT NEEDED ===========================================================
+
+' ----------------------------------------------------------------------
+func savestn%(label$[]);    ' Save settings as a custom config (column headers)
+var fl%;            ' Handle of file to write to
+var i%;             ' Looping variable
+var dlg[maxset%];   ' Array to read dialogue values into
+fl% := FileOpen("",8,1,"Create file to save settings to");
+if fl% > 0 then ' If file open successful
+    view(fl%).print("",view(App(3)).WindowTitle$());
+    for i% := len(settn[]) + 1 to len(settn[]) + 2 do
+        view(fl%).print("",dlgvalue$(i%));    
+    next
+    for i%  := 0 to maxset% - 1 do    ' Populate array with settings from dialogue
+        dlg[i%] := dlgvalue(i% + 1);
+    next
+    view(fl%).print("",dlg[]);    ' Write settings
+    for i% := 0 to len(label$[]) - 1 do
+        view(fl%).print("",label$[i%]);    ' Write column headers
+    next
+    FileClose(0,-1);    ' Finished with file, so close it
+else
+    Message("Settings file save error|Unable to create file to save settings to\n\n(Error code: %d)",fl%);
+endif
+return fl%;
+end
+' ----------------------------------------------------------------------
+func loaddef%(deffile$,dlg%)    ' Load defaults- should pass name and location of default file to load function (Handle of exisitng settings file, name of default settings file, whether called from setting dialogue (1: yes, 0: no)
+var scpath$ := view(App(3)).FileName$(1)+view(App(3)).FileName$(2); ' Path of running script
+Var seth%;  ' Handle of settings file
+Var rder%;  ' Number of read errors returned
+seth% := FileOpen(scpath$ + deffile$,8,0,"");
+if seth% < 1 then ' Failed to open file
+    Message("Default file missing|Failed to load default settings file: %s\n\nFile should be in the same folder as this script:\n\n%s\n\n(Error code: %d)",deffile$,scpath$,seth%);
+    return -1; 
+else
+    if chksetnver(seth%) < 0 then return -2;    endif
+    rder% := rdstn%(seth%,dlg%); 
+    if rder% > 0 then 
+        Message("Settings read error|There were %d errors reading from the default settings file",rder%);   
+        seth% := -3;
+    endif         
+    FileClose(0,-1);
+endif
+return seth%;
+end
+' ----------------------------------------------------------------------
+func loadcus%(maxset%,maxvars%)    ' Load custom settings- this should just pass an empty string to loadstn (number of settings, number of variables)
+Var seth%;  ' handle of setting file opened
+Var rder%;  ' Number of read errors returned
+
+seth% := FileOpen("",8,0,"Open custom settings file");
+if seth% < 1 then ' Failed to open file
+    Message("Error opening settings file|An error occurred in opening settings file\n\n(Error code: %d)",seth%);
+    return -1; 
+else
+    if chksetnver(seth%) < 0 then return -2;    endif
+    rder% :=  rdstn%(seth%,1) > 0; 
+    If rder% > 0 then Message("Settings read error|There were %d errors reading from the settings file",rder%);   return -3 endif 
+    FileClose(0,-1);
+endif    
+return seth%;
+end
+' ----------------------------------------------------------------------
+func chksetnver(sh%);   ' Check settings header matches script
+Var hver$, scver$; ' Version of script indicated in header and version running
+
+view(sh%).read(hver$); ' Read header from settings file
+scver$ := view(App(3)).WindowTitle$();  ' Name of current version of script
+if Right$(scver$,4) <> ".s2s" then scver$ += ".s2s"; endif  ' If version of Windows (Win 7 Home) doesn't include the file type, then append this
+if  scver$ <> hver$ then  ' File header does not match current script
+    Message("Settings file version error|Setting file header does not match script version\n\nHeader:\t%s\n\nScript:\t%s",hver$,scver$);
+    return -1;
+endif
+return 1;
+end
+' ----------------------------------------------------------------------
+func rdstn%(sv%,dlg%)   ' Read settings in and use this to popluate the dialogue (view handle to read from, whether to populate dialogue (1) or apply items directly (0))
+var rditem[len(settn[])], rdstr$[len(ch$[])], lab$[len(reslabel$[])];   ' Array of items and strings read in 
+var i%;                                 ' Looping variable
+Var reader%;                            ' Count of read errors
+for i% := 0 to 1 do ' Read default channel search names
+    If view(sv%).read(rdstr$[i%]) < 0 then reader% += 1;    endif
+next
+view(sv%).read(rditem[]);
+for i% := 0 to maxvars% + 4 - 1 do  ' Read column headers for results file 
+    If view(sv%).read(lab$[i%]) < 0 then reader% += 1;    endif
+next
+if reader% = 0 then 
+    if dlg% = 1 then
+        popdlg%(rditem[],rdstr$[]);
+    else
+        ArrConst(settn[],rditem[]);    
+        ArrConst(ch$[],rdstr$[]);
+        ArrConst(reslabel$[],lab$[]);
+    endif
+endif
+return reader%
+end
+' ----------------------------------------------------------------------
+func popdlg%(items[],str$[]);  'Populate settings dialogue (items to populate it with (index 0 is number of items)) and strings 
+var i%;     ' Count
+for i% := 0 to maxset%-1 do
+    DlgValue(i%+1,items[i%]);
+next
+for i% := 0 to 1 do
+    DlgValue$(maxset%+i%+1,str$[i%]);
+next
+end
+

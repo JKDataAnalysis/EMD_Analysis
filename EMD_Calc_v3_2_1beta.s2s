@@ -1,0 +1,739 @@
+'Version info
+' v3.0.1    - Toolbar implemented
+'               - File selection menu implemented
+' v3.0.2    - Channel selection menu implemented
+' v3.0.3    - Refinements: file open defaults to previously used folder, option to close files flagged for removal from list added
+'           - Analysis settings implemented as a clickable option but that's about it
+' v3.0.4    - edlist modified to produce two arrays, 1 of qued items, 1 of time view handles to close
+'               - que editing finally works
+' v3.0.5    - Threshold minimum search modified to use power in frequency range rather than low-pass filtering
+' v3.0.6    - Treshold search modifed to use measure to channel- reverted to low-pass filtering (may come back to that)
+'               - Variables added to settings dialogue so that strings to search channel titles can be set by user
+'               - Threshold minimum search modifed to require the expected number of repetitions to be found a set number of time in sequence
+'               - Force onset refinement implemented by searching backwards from approximate onsets for zero in diff LP filtered force channel
+' v3.0.7    - Various debugging
+' v3.1.0    - Some functions of script moved to separate scripts (see include list for details)
+' v3.1.1    - Force onset moved to separate function
+'               - Various debugging and refinements
+'               - Implemented writing results to file
+' v3.1.2    - Made number of items qued a separate variable and start que[ from 0!
+'               - Added flagging of succesful analysis with options to clear all items or succesfully completed items from que
+'               - Peak/ trough time and magnitude detection added
+'               - Output modified so that variables will be output as -1 unless they are successfully returned
+' v3.1.3    - Additonal setting added to setting dialogue
+' v3.1.4    - ROFD calculation added
+' v3.1.5    - Manual check of timings added
+'               ' res function added to accomodate this so dependent variables are calculated after manual checking is completed if selected.
+'           - Script crashing in certain cases where more than item was qued- fixed
+'           - Max que length increased to 40
+' v3.1.6    - Cursor labelling tidyed up
+'           - If force onset is outside of expected range, user is given the option to check this as valid
+'           - Rather than marking onset times as script/ manual, the difference between the 2 is given
+'           - Error in relative peak calculation corrected
+'           - Flagging of fails removed as these are now user checked (if selected)
+' v3.2.1    - TKEO transform of EMG data re-implemented
+
+'================== DEBUGGING AND DEVELOPMENT NEEDED ===========================================================
+' Lower priority
+' * Add option to set start/ end times by cursor positions (this may be on version......)
+' * Look at adding control codes into variable headers as CR, i.e. variable^CR^units- Not sure that's going to work!
+' * The way that initial threshold search ranges is set is susceptible to errors if there is a high rest/rep ration- min and max should be treated differently as the baseline should be more stable
+' * Bottom of settings dialogue box is missing if screen is not maximised- resolved, but still potentially a problem on very small/ low res screens
+' * Add units to settings dialogue
+' NEED RESOLVED
+' * ADD: Reinstate EMG onset functions
+
+'================== Global constant and variable declarations  =================================================
+Const maxtmv% := 60;                                ' Maximum number of time views allowed. This is basically arbitary and the script should be robust enough that it could be increased 
+Const maxchan% := 128;                              ' Maximum number of channels allowed. This is basically arbitary and the script should be robust enough that it could be increased 
+Const maxrep% := 99;                                ' Maximum number of expected reps that can be set (used on setn% and getch% dialogues)
+Const maxque% := 40;                                ' Set maximum number of items for que (this is only set to stop dialogues having to be more complex to handle large numbers of qued items)
+Const maxvars% := 9;                                ' Maximum number of variables (0: onset time, 1: Force at onset, peak/ trough times, local peak f, ROFD)
+Var que%[maxtmv%][5];                               ' Array of time views to be processed   (0: view, 1: force ch, 2:emg ch, 3: expected reps, 4: hi/low going force channel (0: high, 1: low))
+Var quen%;                                          ' Number of items qued
+Var stend[maxtmv%][2];                              ' Array for start (0)/end (1) times for analysis
+Var results[maxtmv%][maxrep%][maxvars%];            ' Array of results (que item, rep, variables)
+Var reslabel$[maxvars% + 4];                        ' Headers for columns when results are written (+4 for Item, File, Channel, Rep)
+
+Const maxset% := 30;                                ' Maximum number of settings (size used in creating other arrays hence declared as constant)
+Var ch$[2];                                         ' Channel titles to search for as force [0] and EMG[1]
+Var setflag%;                                       ' Flag if settings have been changed but not saved
+Var stn%;                                           ' Handle of setting file
+Var deffile$ := "EMDCalcDefStn.txt";                ' Name of default settings file
+Var settn[maxset%];                                 ' Array for analysis settings
+
+Const author$ := "Jon Kelly: jon.kelly@ed.ac.uk";   ' Author contact details
+Const wvch% := 1+512+16384+8192+2097152;            ' List of channel types to include (wave and real wave) and exclude (duplicate: 16384, memory: 8192, virtual: 2097152)
+Var er%;                                            ' Error codes
+Var initpath$ := FilePath$(0);                      ' Path for current directory so can be restored at the end of the script
+
+'================== Included scripts  =================================================
+#include "BuildQue_v1_1.s2s"        ' Functions to build que
+#include "SetnLoadSave_v1_1.s2s"    ' Functions to load/ save/ read settings
+#include "ForceOn_v1_1.s2s"         ' Functions for force onset detection
+#include "PeakFind_v1_1.s2s"        ' Function to find peaks
+#include "TKEO_v0_1.s2s"            ' Function to do TKEO transform
+
+'================== Start of script initiation process ===========================================================
+PrintLog("\n\n===================================================================================================\n");
+PrintLog("Running: %s \t\tStarted at: %s\t%s\n",view(app(3)).WindowTitle$(),Time$(1,7,0,":"),Date$(2,3,3,2," "));
+PrintLog("Script written by: %s\n",author$);
+PrintLog("===================================================================================================\n");
+initialise();
+
+func initialise();
+View(app(0)).Window(0,0,100,100,1);  ' Use the whole desktop
+View(app(3)).WindowVisible(0);   ' Hide script window
+var setok% := loaddef%(deffile$,0);  ' Loaded settings ok (handle of setting file)
+if  setok% > 0 then; ' Load default settings succesfull
+    stn% := setok%; 
+else
+    loadcus%(maxset%,maxvars%);
+endif
+repeat
+    er% := tbar%(quen%);  ' Analysis button on if at least one item is set
+until er% =1;	' Quit clicked
+end
+
+' ----------------------------------------------------------------------
+Func tbar%(aon%)   ' Create toolbar (analysis on)
+ToolbarClear();
+ToolbarSet(1,"&Quit|0x1b",leaveall%);
+ToolbarSet(3,"&Build que",tlbrchoosev%);
+ToolbarSet(4,"&Settings",setn%);
+ToolbarSet(6,"Analysis &list ("+str$(quen%)+")",anallst%);
+ToolbarSet(7,"&Analyze",runanal%);
+ToolbarEnable(6,aon%);
+if (aon% > 0 and stn% > 0 and settn[3] = 1) then ' can only analyse if something is in list, setting have been loaded and at least one analysis selected (currently only force onset)
+    ToolbarEnable(7,1);    
+else
+    ToolbarEnable(7,0);    
+endif
+if aon% >= maxque% then  ' disable build que button once max number of items is reached
+    ToolbarEnable(3,0);
+else
+    ToolbarEnable(3,1);
+endif
+return Toolbar("Use menu on right",1023); ' Return number of button pressed
+End;
+' ---------------------------------------------------------------------
+Func checkfile(v%,silent%)	' Checks that opened file is appropriate (view handle to check, whether to give messages (0: no, 1: yes))
+Var waves%[100];    ' Dummy array for waveform channels
+View(v%).Chanlist(waves%[],wvch%);	' fill arary with waveform channel numbers ignoring excluded channel types
+DoCase
+    Case waves%[0] < 2 Then
+        if silent% = 1 then Message ("Incompatible file error!|A minimum of 2 waveform channels are required\nOnly %d found",waves%[0]);    endif
+        return -1;
+    Case waves%[0] > maxchan% Then
+        if silent% = 1 then Message ("Incompatible file error!|%d waveform channels founds\n\nMaximum allowed is %d\n\nThis can be increased- speak to the script's author\n\n",waves%[0],maxchan%,author$);    endif
+        return -2;
+    else return 1
+endcase
+End
+
+' ---------------------------------------------------------------------
+Func getch%(vw%)		' Procedure to allow user to select channels for analysis (time view to use)
+Var waves%[maxchan%+1];   	' Dummy array for waveform channels +1 to allow for 0 index being used for number of channels
+Var er%:=0;                 ' Error codes
+Var i%;                     ' Looping variables
+Var emg%, force%, reps% := settn[0];  ' Selected EMG and force channels and expected number or reps
+var st,endt:=view(vw%).maxtime();    ' start/end times 
+var all%:=1;                ' Analyse whole file
+view(vw%);
+waves%[0] := Chanlist(waves%[],wvch%);  ' fill arary with waveform (1) and realwave (512) channel numbers ignoring excluded channel types
+emg% :=waves%[2]; force% :=waves%[1];
+For i% := 1 to waves%[0] do ' Default to channels containing probable names
+    if InStr(chantitle$(waves%[i%]),ch$[0]) > 0 then force% :=waves%[i%];  endif
+    if InStr(chantitle$(waves%[i%]),ch$[1]) > 0 then EMG% :=waves%[i%];  endif
+next
+If emg% = force% then   emg% :=waves%[2]; force% :=waves%[1];   endif;  ' Just in case there's a channel called, for example'forcemg'
+ChanHide(-1);   ' hide all channels
+For i% := 0 to waves%[0]-1 do   ' make all included channels visible so user can see what they are picking from
+    ChanShow(waves%[i%+1]); 
+    Draw(0,maxtime());
+    Optimise(waves%[i%+1]);
+Next
+FrontView(view());
+DlgCreate("Choose channels for analysis",0,0);
+DlgGroup("Analysis channels",1,1,35,3);
+DlgChan(1,"EMG",wvch%,12,2);
+DlgChan(2,"Force",wvch%,12,3);
+DlgGroup("Analysis window",1,5,35,3);
+DlgReal(3,"Start time",0,view(vw%).maxtime(),12,6);
+DlgReal(4,"End time",0,view(vw%).maxtime(),12,7);
+DlgText("Whole file",26,6);
+DlgCheck(5,"",29,7);
+DlgGroup("Expected No. of reps",1,9,35,2);
+DlgInteger(6,"&Reps",1,maxrep%,12,10,1);
+DlgButton(1,"&Add|Add to list for processing"); ; 'Replace ok button 
+DlgAllow(0x3ff,0,chngch%);
+if DlgShow(emg%,force%,st,endt,all%,reps%) then ' Add clicked
+    que%[quen%][0] := vw%;
+    que%[quen%][1] := force%;
+    que%[quen%][2] := emg%;
+    que%[quen%][3] := reps%;
+    if all% = 0 then 
+        stend[quen%][0] := st;   
+        stend[quen%][1] := endt;    
+    else 
+        stend[quen%][0] := 0;   
+        stend[quen%][1] := view(vw%).maxtime(); 
+    endif
+    que%[quen%][4] := hlgo%(que%[quen%][1],stend[quen%][0],stend[quen%][1]);    ' Check whether force channel is high or low-going
+    DlgCreate("Confirmation of items added for analysis");
+    DlgText("File:",1,1.5);   DlgText(View(vw%).Windowtitle$(),16,1.5);
+    DlgText("Force channel:",1,3);   DlgText(str$(que%[quen%][1])+": "+ChanTitle$(que%[quen%][1]),16,3);
+    DlgText("EMG channel:",1,3.5);   DlgText(str$(que%[quen%][2])+": "+ChanTitle$(que%[quen%][2]),16,3.5);
+    DlgText("From :",1,4.5);   DlgText(str$(stend[quen%][0])+" to "+str$(stend[quen%][1])+"s",16,4.5);
+    DlgText("Expected reps :",1,5.5);   DlgText(str$(que%[quen%][3]),16,5.5);
+    DlgCheck(1,"Force channel is high-going",2,7);
+    DlgButton(0,"");    ' remove cancel button
+    DlgShow(que%[quen%][4]);
+    quen% += 1;
+endif
+End;
+' ---------------------------------------------------------------------
+func chngch%(cg%)   ' If values in getch dialogue change
+docase
+    case (cg% = 1 or cg% =2 ) then  ' Channel selection has changed
+        if dlgvalue(1)=dlgvalue(2) then 
+            message("Selection error|EMG and force cannot be set to same channel"); return 0 
+        endif
+    case (cg% = 3 or cg% = 4) then  ' Start/end times have changed
+        if abs(dlgvalue(3) - dlgvalue(4))< 1 then Message("Analysis period must be a minimum of 1 second"); return 0 
+        endif
+    case (cg% = 0 or cg% = 5) then DlgEnable(abs(dlgvalue(5)-1),3,4); ;
+endcase
+return 1
+end;
+' ----------------------------------------------------------------------
+Func hlgo%(ch%,t1,t2);    ' Check whether channel is high of low going (channel, start and end times for checking)
+' This method isn't totally robust (it will depend on the proportion of rep/rest, be vulnerable to noisy data, etc. but it should be right most of the time)
+Var chmean,chmax,chmin;     ' Mean, Max and Min of channel- used only to deterime if low or high-going
+chmean:=ChanMeasure(ch%,2,t1,t2);
+chmax:=ChanMeasure(ch%,8,t1,t2);
+chmin:=ChanMeasure(ch%,9,t1,t2);
+return abs(chmax-chmean)>abs(chmin-chmean);
+End 
+' ---------------------------------------------------------------------
+Func runanal%()  ' Passes qued items to each stage of the analysis process
+var i%,j%;                      ' looping variables
+var vwtmp% := view(0);          ' Handle for view that is set when function called
+Var fonch%, pkch%;              ' Handle of force onset and peak marker channels
+Var fch%, diffch%, tkeoch%;     ' Handle of filtered force, filtered and differentiated force channels and TKEO channel
+Var t;                          ' Time of markers
+Var fon%, pkon%;                ' Number of force onsets and peaks returned
+Var cl% := 1;                   ' Flag to clear que (1: yes, 0: no)
+
+ArrConst(results[][][],-1); ' set all results as flagged as failed as default
+for i% := 0 to quen% - 1 do ' For each qued item
+    view(que%[i%][0]);
+    ChanSelect(-1,0);   ' Deselect all channels
+    If settn[1] = 1 then PrintLog("%s\nHigh going = %s\n",WindowTitle$(),str$(que%[i%][4] = 1));   endif;   ' DEBUG
+    If settn[7] = 1 then    ' Fitlering on
+        fch% := firfiltch%(que%[i%][0],que%[i%][1],stend[i%][0],stend[i%][1],2,settn[9],settn[8],0);   ' low- pass filter channel
+        if fch% < 1 then break;
+        else chanshow(fch%);    ChanSelect(fch%,1); ChanTitle$(fch%,"FiltForce");' Add created channel to list for deletion when we tidy up
+        endif
+    else fch% := que%[i%][1]; ' If fitering off, set filter channel to original force channel
+    endif
+    diffch% := firfiltch%(que%[i%][0],fch%,stend[i%][0],stend[i%][1],6,settn[17],settn[18],0);   ' low-pass Differentiate filtered channel     '##### Change setttings
+    If settn[3] = 1 then    ' Force onset active
+        fonch% := forceonset%(que%[i%][0],fch%,diffch%,stend[i%][0],stend[i%][1],que%[i%][3],que%[i%][4],settn[4],settn[5],settn[6],settn[16],settn[18],maxrep%,settn[1],settn[10:7]);
+        if fonch% > 0 then  ' Succesfully found at least some onsets
+            chanshow(fonch%);    ChanSelect(fonch%,1); 
+            fon% := MemGetItem(fonch%,0);
+        endif
+    endif
+    if (fon% > 0 and settn[19] = 1) then    ' Did find some onsets and peak find selected
+        pkch% := peakfind%(que%[i%][0],fch%,fonch%,settn[20],settn[21],que%[i%][4],settn[22],settn[1]);  ' Only do peaks if onsets were successful (used as starting point for peaks)
+        if pkch% > 0 then ' Successfully found at least some peaks
+            chanshow(pkch%);    ChanSelect(pkch%,1); 
+            ChanTitle$(pkch%,"PkTrough");' Add created channel to list for deletion when we tidy up
+        
+            pkon% := MemGetItem(pkch%,0);
+        endif
+    endif
+    If settn[29] <= 1 then manchk%(que%[i%][0],que%[i%][3],fonch%,pkch%,fch%,diffch%,settn[29]); endif   ' If check all is selected or check fails and results flagged as including fails then check manually
+    res(i%,fonch%,pkch%,fch%); ' Get results and add to array
+    tkeoch% := dotkeo(que%[i%][0],que%[i%][2],stend[i%][0],stend[i%][1]);
+    if settn[2] = 1 then ChanDelete(-3,0);  ' Delete selected
+    else Optimise(-3);    'optimise selected
+    endif
+next
+view(vwtmp%);   ' restore to previous view
+if fon% + pkon% > 0 then ' If at least one analysis of one item succeeded
+    while finanal%() < 0 do wend;   ' Keep calling finanal till succesfully saved or user clicked to abandon
+endif
+ArrConst(results[][][],0);  ' Clear results array
+clearque%();
+if Query("Analysis complete|Analysis of qued items complete\n\nQue more items?") = 1 then choosev%(0);  endif
+Return 0;
+End;
+' ----------------------------------------------------------------------
+func clearque%();
+ArrConst(que%[][],0);   quen% := 0;   ' Clear que
+ArrConst(stend[][],0);  ' Clear start/ end times array
+Return 0;
+end
+' ----------------------------------------------------------------------
+Func setn%()    ' Load, save, view or edit analysis settings
+Var dlgstn[maxset%];                    ' Values set in dialogue
+Var dlgchlab$[2];                       ' Default channel labels for force and EMG
+Var rtn%;                               ' Value returned by dlgshow
+const gpg := 3;                         ' Gap between group boxes
+const ofst := 3;                        ' Offset between groups, dialogue edge etc.
+Const colw := 45, coln% := 3;           ' Column width and number of columns
+const wdnum := 10, laboff := 27;        ' Width of number entry boxes and offset for labels
+const grwd := colw - ofst ;             ' Width of groups
+
+' group x positions (offset + colum width * column number (1st is 0))
+const defrepx := ofst + colw * 1;       ' Default reps box  
+const srsgx := ofst + colw * 1;         ' Channel title search strings group
+const forgx := ofst / 2 + colw * 0;     ' Force threshold parameters group
+const fpgx := ofst + colw * 1;          ' Filter parameters group 
+const fo1stx := ofst + colw * 0;        ' Force onset, first pass parameters group
+const fo2ndx := ofst + colw * 0;        ' Force onset, second pass parameters group
+const fo3rdx := ofst + colw * 0;        ' Force onset, third pass parameters group
+const peakonx := ofst + colw * 1;       ' Peak find toggle
+const rofdx := ofst + colw * 2;         ' ROFD group
+
+' group widths (offset + colum width * column number (1st is 0))
+const forgw := grwd + ofst;             ' Force threshold parameters group  
+const fpgw := grwd;                     ' Filter parameters group 
+const fo1stw := grwd;                   ' Force onset, first pass parameters group
+const fo2ndw := grwd;                   ' Force onset, second pass parameters group
+const fo3rdw := grwd;                   ' Force onset, third pass parameters group
+const peakonw := grwd;                  ' Peak force parameters group
+const rofdw := grwd;                    ' ROFD group
+const btnw := 18;                       ' Button group
+const optw := colw - btnw - ofst;       ' Options group
+
+' group y positions and heights (must be listed in order that they appear in dialogue as they are calculated relative to the items and groups above, heights = items + offset)
+const defrepy := 1.5;                           ' Default reps box  
+
+const srsgy := defrepy + 1, srsgh := 3.2;       ' Channel title search strings group box y and h
+const forgy := 1.5;                             ' Force onset parameters group y
+const fpgy := srsgy + defrepy + 2;              ' Filter parameters group box h (+ 2 to offset for parameter inclusion check box)
+const fpgh := 3 + ofst / 2;                     ' Filter parameters group box y
+const fo1sty := forgy + 2;                      ' Force onset, first pass parameters group y  (+ 2 to offset for parameter inclusion check box)
+const fo1sth := 3 + ofst / 2;                   ' Force onset, first pass parameters group h
+const fo2ndy := fo1sty + fo1sth + 0.5;          ' Force onset, second pass parameters group y 
+const fo2ndh := 7 + ofst / 2;                   ' Force onset, second pass parameters group h
+const fo3rdy := fo2ndy + fo2ndh + 0.5;          ' Force onset, third pass parameters group y
+const fo3rdh := 3 + ofst  / 2;                  ' Force onset, third pass parameters group h
+const forgh := fo1sth + fo2ndh + fo3rdh + ofst * 1.25; ' Force onset parameters group h
+const peakonh := 4 + ofst  / 2;                 ' Peak force group h
+const peakony := fpgy + fpgh + 0.5;             ' Peak find toggle
+const rofdh := 6 + ofst  / 2;                   ' ROFD group h
+const rofdy := 1.5;                             ' ROFD parameters group y
+const btnh := 3 + ofst / 2;                     ' Buttons group h
+const opth := 3 + ofst / 2;                     ' Options group h
+
+const dlgw := colw * coln% + ofst, dlgh := forgh + 3;   ' Width and height of dialogue box
+' Groups who's positions are relative to dialogue size
+const optx := dlgw - colw -1;                   ' Options group x
+const btnx := dlgw - btnw -1 ;                  ' Buttons group x
+const btny := dlgh - btnh - 1;                  ' Buttons group y
+const opty := dlgh - opth - 1;                  ' Options group y
+
+arrconst(dlgstn[],settn[]);  arrconst(dlgchlab$[],ch$[]);  ' Copy current settings to dialogue array
+DlgCreate("Analysis settings",0,0,dlgw,dlgh); 
+
+DlgGroup("Channel title search",srsgx,srsgy,grwd,srsgh);
+DlgText("Force string|String to search channel titles for to try to identify default force channel",srsgx + 1,srsgy + 1);   DlgString(maxset% + 1,9,9,"",srsgx + laboff,srsgy + 1);
+DlgText("EMG string|String to search channel titles for to try to identify EMG channel",srsgx + 1,srsgy + 2);   DlgString(maxset% + 2,9,9,"",srsgx + laboff,srsgy + 2);
+
+DlgText("Default expected reps|The default expected number of repetitions",defrepx + 1,defrepy); DlgInteger(1,wdnum,1,maxrep%,defrepx + laboff,defrepy,1);
+
+DlgGroup("Force onset detection parameters",forgx,forgy,forgw,forgh);
+DlgCheck(4,"Find force onset|Whether to include force onset search in analysis",fo1stx + 1,forgy + 1);
+
+DlgGroup("First pass (multi-threshold)",fo1stx,fo1sty,fo1stw,fo1sth);
+DlgText("Min time between crossings|Minimum time between force onsets to except as valid",fo1stx + 1,fo1sty + 1);   DlgReal(5,wdnum,0,5,fo1stx + laboff,fo1sty + 1,0.1);
+DlgText("Hysteresis|How far from the threshold a waveform can move and be rejected as noise",fo1stx + 1,fo1sty + 2);    DlgReal(6,wdnum,0,100,fo1stx + laboff,fo1sty + 2,0.1); 
+DlgText("Min. Rep. cluster|First pass: How many consecutive thersholds must return expected number of reps",fo1stx + 1,fo1sty + 3);    DlgInteger(7,wdnum,3,10,fo1stx + laboff,fo1sty + 3,1); 
+
+DlgGroup("FIR low-pass filter parameters",fpgx,fpgy,grwd,fpgh);
+DlgCheck(8,"Filter on",fpgx + 1,fpgy + 1);  
+DlgText("Corner Frequency (Hz)|The frequency that the signal will start to be attenuated at",fpgx + 1,fpgy + 2); DlgReal(9,wdnum,1,500,fpgx + laboff,fpgy + 2,0.5); 
+DlgText("Transition width(Hz)|How much higher than the corner frequency will maximum attenuation be achieved",fpgx + 1,fpgy + 3);  DlgReal(10,wdnum,1,2000,fpgx + laboff,fpgy + 3,0.5);
+
+DlgGroup("Second pass (Quiescent end)",fo2ndx,fo2ndy,fo2ndw,fo2ndh);
+DlgText("SD multiple|Number of SD multiples to be exceeded for level to be regarded as no longer quiescent",fo2ndx + 1,fo2ndy + 1);    DlgReal(11,wdnum,0.5,10,fo2ndx + laboff,fo2ndy + 1,0.5); 
+DlgText("SD calculation window|Size of time window to calculate SDs over",fo2ndx + 1,fo2ndy + 2);    DlgReal(12,wdnum,0.001,5,fo2ndx + laboff,fo2ndy + 2,0.01); 
+DlgText("Window increment|Amount of time to move the SD calculation window by each time",fo2ndx + 1,fo2ndy + 3);  DlgReal(13,wdnum,0.001,5,fo2ndx + laboff,fo2ndy + 3,0.01); 
+DlgText("Search range|Amount of time prior to identified force onsets to search for quiescent period",fo2ndx + 1,fo2ndy + 4);  DlgReal(14,wdnum,0.1,30,fo2ndx + laboff,fo2ndy + 4,0.25); 
+DlgText("Hysteresis|How far from the threshold a waveform can move and be rejected as noise",fo2ndx + 1,fo2ndy + 5);  DlgReal(15,wdnum,0,100,fo2ndx + laboff,fo2ndy + 5,0.1); 
+DlgText("Minimum time gap|Minimum time between threshold crossings to except as valid",fo2ndx + 1,fo2ndy + 6);  DlgReal(16,wdnum,0,30,fo2ndx + laboff,fo2ndy + 6,0.01); 
+DlgText("Percentile SD mean|Percentile over which to calculate mean SD (to avoid noise spikes and initial onset slope)",fo2ndx + 1,fo2ndy + 7);  DlgInteger(17,wdnum,25,100,fo2ndx + laboff,fo2ndy + 7,1); 
+
+DlgGroup("Final pass (Slope zero)",fo3rdx,fo3rdy,fo3rdw,fo3rdh);
+DlgText("FIR low-pass differentiator",fo3rdx + 1, fo3rdy +1);
+DlgText("Corner Frequency (Hz)|The frequency that the signal will start to be attenuated at",fo3rdx + 1,fo3rdy + 2); DlgReal(18,wdnum,1,500,fo3rdx + laboff,fo3rdy + 2,0.5); 
+DlgText("Transition width(Hz)|How much higher than the corner frequency will maximum attenuation be achieved",fo3rdx + 1,fo3rdy + 3);  DlgReal(19,wdnum,1,2000,fo3rdx + laboff,fo3rdy + 3,0.5);
+
+DlgGroup("Peak force",peakonx,peakony,peakonw,peakonh);
+DlgCheck(20,"Find peak force",peakonx + 1,peakony + 1);  
+DlgText("Search window|Time window to search from force onset for peak force",peakonx + 1,peakony + 2);   DlgReal(21,wdnum,0.1,20,peakonx + laboff,peakony  + 2,0.25);
+DlgText("Min width of peak|Minimum time peak must meet excursion criteria to be excepted as valid",peakonx + 1,peakony + 3);   DlgReal(22,wdnum,0,60,peakonx + laboff,peakony + 3,0.1);
+DlgText("Hysteresis|How far from the threshold a waveform can move and be rejected as noise",peakonx + 1,peakony + 4);    DlgReal(23,wdnum,0,100,peakonx + laboff,peakony + 4,0.1); 
+
+DlgGroup("Rate of force development/ relaxation",rofdx,rofdy,rofdw,rofdh);
+DlgCheck(24,"Calculate ROFD",rofdx + 1,rofdy + 1);  
+DlgText("Lower percentile|The percentage of force range to be used as the start of ROFD calculation zone",rofdx + 1,rofdy + 2);  DlgInteger(25,wdnum,0,100,rofdx + laboff,rofdy + 2,1); 
+DlgText("Upper percentile|The percentage of force range to be used as the end of ROFD calculation zone",rofdx + 1,rofdy + 3);  DlgInteger(26,wdnum,0,100,rofdx + laboff,rofdy + 3,1); 
+DlgText("Hysteresis|How far from the threshold a waveform can move and be rejected as noise",rofdx + 1,rofdy + 4);  DlgReal(27,wdnum,0,100,rofdx + laboff,rofdy + 4,0.1); 
+DlgText("Minimum time gap|Minimum time between threshold crossings to except as valid",rofdx + 1,rofdy + 5);  DlgReal(28,wdnum,0,30,rofdx + laboff,rofdy + 5,0.01); 
+DlgText("Relax time window|Time period after peak to include in search for relaxation thresholds",rofdx + 1,rofdy + 6);  DlgReal(29,wdnum,0.1,20,rofdx + laboff,rofdy + 6,0.25); 
+
+DlgGroup("Analysis templates",btnx,btny,btnw,btnh);
+DlgButton(2,"Load &default  ",loaddefbtn%,btnx + 1,btny + 1);
+DlgButton(3,"Load &custom",loadcusbtn%,btnx + 1,btny + 2);
+DlgButton(4,"S&ave custom",savecustombtn%,btnx + 1,btny + 3);
+
+DlgGroup("Options",optx,opty,optw,opth);
+DlgCheck(2,"Debu&g mode",optx + 1,opty + 1);
+DlgCheck(3,"Delete temp channels",optx + 1,opty + 2);
+DlgText("Check|Which times to carry out manual checking on before completing analysis",optx + 1,opty + 3);  Dlglist(30,wdnum,"All|Fail|None",3,optx + wdnum + 1,opty + 3); 
+
+DlgAllow(0x3ff,0,stnchng%);
+
+if DlgShow(dlgstn[],dlgchlab$[]) = 1 then 
+    ArrConst(settn[],dlgstn[]);
+    ArrConst(ch$[],dlgchlab$[]);
+endif
+End;
+' ----------------------------------------------------------------------
+Func savecustombtn%()   ' Jumping off point for savestn% call
+var stnh%;  ' Handle of setting file
+stnh% := savestn%(reslabel$[]); 
+if stnh% > 0 then     ' If succesfully saved settings, flag settings as not having been changed and update settings handle
+    setflag% := 0;  
+    stn% := stnh%;
+endif   
+return 1
+end;
+' ----------------------------------------------------------------------
+Func loadcusbtn%()   ' Jumping off point for loadcustom call
+var stnh%;  ' Handle of setting file
+stnh% := loadcus%(maxset%,maxvars%);
+if stnh% > 0 then     ' If succesfully saved settings, flag settings as not having been changed and update settings handle
+        stn% := stnh%;
+endif   
+return 1
+end;
+
+' ----------------------------------------------------------------------
+func loaddefbtn%()    ' load deafults clicked (essentially a bounce point so loaddef can be called from start of program without attempting to repopulating settings dialogue (dlgvalue)
+Var seth%;  ' Handle of settings file
+seth% :=  loaddef%(deffile$,1);
+if seth% > 0 then ' If succesfully loaded defaults
+    stn% := seth%;
+endif
+return 1;   ' Keep dialogue box open
+end
+' ----------------------------------------------------------------------
+
+func stnchng%(x%) ' Handles changes in settings dialogue
+var dummy%[28 - 5 + 1]; 'Array for force onset dialogue indexes (Last - first + 1 (as inclusive count))
+arrconst(dummy%[],1);   dummy%[0] := 5;  ArrIntgl(dummy%[]); ' Fill array with index of force onset settings (4-18)
+docase 
+    case ((x% = 4) or (x% = 0)) then 
+        DlgEnable(DlgValue(4),dummy%[]);                        ' Force onset toggle
+        DlgEnable(DlgValue(4) * DlgValue(8),9,10);              ' Filter parameters off unless both force onset and filter toggle on
+        DlgEnable(DlgValue(4) * DlgValue(20),21,22,23,24,25,26,27,28);   ' ROFD toggle and parameters off unless force onset and peak find on
+        DlgEnable(DlgValue(4) * DlgValue(20)* DlgValue(24),25,26,27,28);   ' ROFD parameters off unless force onset, peak find and ROFD toggle on
+    case x% = 8 then DlgEnable(DlgValue(8),9,10);               ' Filter toggle
+    case x% = 20 then DlgEnable(DlgValue(20),21,22,23,24,25,26,27,28);   ' Peak force toggle
+        DlgEnable(DlgValue(20) * DlgValue(24),25,26,27,28);     ' ROFD parameters off unless both peak find and ROFD toggle on
+    case x% = 24 then DlgEnable(DlgValue(24),25,26,27,28);      ' ROFD toggle
+endcase
+if x% > 0 then setflag% := 1; endif ' Flag that settings have been changed
+return 1;
+end
+' ---------------------------------------------------------------------   
+Func createvch%()' Create event channel
+Var ch%;    ' Handle of channel created
+ch% := MemChan(5);    
+If ch% <1 then
+    Message("Channel creation error!|\nUnable to create event channel\n");
+endif
+return ch%;
+end    
+' ----------------------------------------------------------------------
+func manchk%(vw%,rp%,fonev%,pkev%,fch%,diffch%,failall%); ' Check times set by script manually with temporary cursors (view, No of reps expected, event channels with force onsets and peaks, filtered force and differentiated 
+    'force channel, whether to check all of fails only)
+var ct[2][2], hc[4];            ' Existing cursor times and label mode and horizontal cursor channel, level, label mode and label position
+var i%,j%;                      ' Looping variables
+var labfld$ := "";              ' Cursot label field string- really dont' undertand why this is needed!
+var btn%;                       ' Button pressed
+var mkcode%[4];                 ' Array for event marker codes
+var t;                          ' Time of events
+var evt[rp%][2];                ' Array for event times (Size of 1st dimension of array = number of events)
+var ch%[2];                     ' Array for force onset and peak times event channels
+var misst := maxtime(fch%) / 2; ' Time for missing events (middle of file)
+var xl, xr;                     ' Left and right hand side of x view
+var vwtmp% := view();           ' View when called (just in case its gone off to something else
+const xwin := 2;                ' Time window either side of onset/ peak to zoom to
+var fail%[2];                   ' Flag events as fail if they cannot be identified even manually (0: force onset, 1: peak)
+view(vw%);
+const tmgrpx := 1, tmgrpy := 2, tmgrpw := 41;    'Time group x, y and w
+var t$;                         ' Times as string for dialogue
+var clab$[2];   clab$[0] := "F.Onset";  clab$[1] := "F. Peak";
+
+arrconst(evt,-1);   ' Set to negative as a flag for missing event times (time could = 0)
+ch%[0] := fonev%; ch%[1] := pkev%;
+for i% := 1 to 2 do ' Get current details of cursors 1 and 2 if they exist
+    if cursor(i%) > 0 then ' Cursor exists
+        ct[i% - 1][0] := cursor(i%);
+        ct[i% - 1][1] := CursorLabel(labfld$,i%);
+        else CursorNew(0,i%);   ' If cursor doesn't exist, create it
+    endif
+next
+if HCursorExists(1) = 1 then
+    hc[0] := HCursorChan(1);    ' Record channel
+else
+    HCursorNew(diffch%,0);  ' Set horizontal cursor to 0
+endif
+hc[1] := HCursor(1,0,diffch%);  ' Record position and reposition to 0 in diffch
+hc[2] := HCursorLabel(3,1);     ' Record previous setting and set to number and position
+hc[3] := HCursorLabelPos(1,50); ' Record previous setting and set to middle
+for j% := 0 to 1 do
+    for i% := 0 to rp% - 1 do  ' Fill array with times
+        t :=  memgetitem(ch%[j%],i% + 1,mkcode%[]);
+        if t >= 0 then   ' If got time, add it to the array (or leave as -1)
+            if (mkcode%[0] > 0 and mkcode%[0] <= rp%) then
+                evt[mkcode%[0] - 1][j%] := t;   
+            else 
+                Message("Invalid marker code|Invalid marker code (%d) returned for rep %d\nMust be <= expected number of reps (%d)",mkcode%[0],i%,rp%);
+            endif
+        else    
+            mkcode%[0] := i% + 1;
+            MemSetItem(ch%[j%],0,0,mkcode%[]);  ' Create extra marker or won't be able to set it to a new position later
+        endif
+    next
+next
+Chanhide(-1);   ' Hide all channels
+ChanShow(fch%); ChanShow(diffch%);  ' Show filtered and differentiated force channels
+FrontView(vw%); ' Make sure relevant view is at front
+For i% := 1 to rp% do   ' For each expected rep
+    if (((evt[i% - 1][0] < 0 or evt[i% - 1][1] < 0) and failall% = 1) or failall% = 0) then ' If one or more time missing and check fail selected or check all selected
+        arrconst(fail%[],0);    ' Reset to not flagged as failed
+        for j% := 0 to 1 do ' For force onset and peak
+            if evt[i% - 1][j%] >= 0 then 
+                Cursor(j% + 1,evt[i% - 1][j%]);
+                CursorLabel(4,j% + 1,clab$[j%]);
+            else
+                Cursor(j% + 1,misst);
+                CursorLabel(4,j% + 1,clab$[j%] + " *FAIL*");
+            endif
+            CursorLabelPos(j% + 1,45 + j% * 10);
+        next
+        draw(cursor(1) - xwin,(cursor(2) + xwin)-(cursor(1) - xwin)); ' Zoom to set left and right range
+        Optimise(-2);   ' Optimise zoomed window
+        DlgCreate("Manual check of times found by script",25);
+        DlgText(windowtitle$(),1,1);    DlgText("Rep:",tmgrpx + 20,1); DlgInteger(1,2,0,maxtime(),tmgrpx + 29,1);
+        DlgButton(0,"");    ' Hide cancel button
+        DlgButton(1,"&Set times|Set times to the current cursor positions");
+        DlgButton(2,"Abort checking");
+    
+        DlgGroup("Script times",tmgrpx,tmgrpy,tmgrpw,3); 
+        DlgText("Onset (1):",tmgrpx + 1,tmgrpy + 1);    DlgReal(2,8,-1,maxtime(),tmgrpx + 10.5,tmgrpy + 1,0,6);  
+        DlgButton(3,"Reset cursor|Reset curosr to times calculated by script",reseton%,tmgrpx + 20,tmgrpy + 1); DlgCheck(4,"Fail|Flag this as not possible to identify",tmgrpx + 34,tmgrpy + 1);
+        DlgText("Peak (2):",tmgrpx + 1,tmgrpy + 2);     DlgReal(3,8,-1,maxtime(),tmgrpx + 10.5,tmgrpy + 2,0,6);  
+        DlgButton(4,"Reset cursor|Reset curosr to times calculated by script",resetpk%,tmgrpx + 20,tmgrpy + 2); DlgCheck(5,"Fail|Flag this as not possible to identify",tmgrpx + 34,tmgrpy + 2);
+        DlgAllow(0x3ff,0,curdlgchng%);
+        btn% := DlgShow(i%,evt[i% - 1][],fail%[]);
+        docase
+            case btn% = 1 then 
+                if cursor(2) > cursor(1) then
+                    mkcode%[0] := i%;   
+                    for j% := 0 to 1 do 
+                        if fail%[j%] = 1 then   ' If flagged as fail
+                            mkcode%[1] := 0;    'Flag as fail
+                            MemSetItem(ch%[j%],i%,-1,mkcode%[]);   ' Flag as fail
+                        else
+                            if abs(cursor(j% + 1) - evt[i% - 1][j%]) > 0.001 then   ' If moved by more than 1 ms
+                                mkcode%[1] := 2;    'Flag as manually set times
+                                MemSetItem(ch%[j%],0,cursor(j% + 1),mkcode%[]);   ' Create new marker at cursor position (Won't create marker if at same time as existing marker (i.e. no changes made))
+                            endif
+                        endif
+                    next   
+                else
+                    Message("Error in times set|Error in times set\n\nForce onset time (Cursor 1) must be < peak/ trough time (Cursor 2)");
+                    i% -= 1;
+                endif
+            case btn% = 2 then retcurs(ct[][], hc[]); view(vwtmp%);    return -1;  ' Put cursors back where we found them, restore view, finished here
+        endcase
+    endif
+next
+retcurs(ct[][],hc[]);    ' Put cursors back where we found them
+view(vwtmp%);   ' Restore view set at call
+end
+' ----------------------------------------------------------------------
+func curdlgchng%(i%);   ' Call back funciton for changes in cursor adjust dialogue
+if i% = 0 then  ' When called prior to showing dialogue
+    DlgEnable(0,1,2,3);
+    if DlgValue(2) < 0 then DlgEnable(0,-3); endif
+    if DlgValue(3) < 0 then DlgEnable(0,-4); endif
+endif
+docase
+    case i% = 4 then DlgEnable(abs(dlgvalue(4) - 1),-3);    ' Set 'reset cursor' buttons to off if fail selected
+    case i% = 5 then DlgEnable(abs(dlgvalue(5) - 1),-4);
+endcase
+return 1
+end
+' ----------------------------------------------------------------------
+func reseton%() ' Reset force onset cursor to the time found by the script
+Cursor(1,dlgvalue(2));
+return 1
+end
+' ----------------------------------------------------------------------
+func resetpk%() ' Reset peak force cursor to the time found by the script
+Cursor(2,dlgvalue(3));
+return 1
+end
+
+' ----------------------------------------------------------------------
+proc retcurs(c[][],hc[]);   ' Put the cursors back where you found them ([index][0:time, 1: label mode)), horizontal cursor[channel, level, label mode and label position]
+var i%;
+for i% := 1 to len(c[][0]) do ' For each cursor
+    if c[i% - 1][0] > 0 then 
+        cursor(i%,c[i% -1][0]);
+        CursorLabel(c[i% - 1][1],i%);
+    else
+        CursorDelete(i%);   ' If created the cursor, delete it
+    endif
+next
+if hc[0] > 0 then ' and horizontal cursor
+    HCursor(1,hc[1],hc[0]);     ' Restore position and channel
+    HCursorLabel(hc[2],1);      ' Restore previous label mode
+    HCursorLabelPos(1,hc[3]);   ' Restore to previous setting
+else
+    HCursorDelete(i%);   ' If created the cursor, delete it
+endif
+end
+' ---------------------------------------------------------------------
+Func firfiltch%(vw%,ch%,stt,endt,t%,trw,f1%,f2%)    'Apply a FIR filter to a channel (View and channel to apply to, start/end times, 
+        'type of filter, transition width, corner frequency 1 and 2)
+    Var fch%;       ' Handle of memory channel created
+    
+    If (t% = 4 or t% = 5 and f2% < 1) then ' Band-pass/stop with no second frequency
+        Message("Filter error!|Band pass or stop filter requested with no second corner specified");
+        Return -1;
+    else
+        If ((t% = 2 or t% = 3) and f1% < 1) then ' Low or high-pass
+            Message("Filter error!|No filter frequency specified"); 
+            return -2;
+        else
+            docase
+                case (t% = 2 or t% = 3 or t% = 6) then FiltCreate(-1,t%,trw,f1%); ' high or low-pass or low-pass differentiator
+                case t% = 4 then FiltCreate(-1,t%,trw,f1%,f2%); ' band-passs
+                'case t% = 6 then FiltCreate(-1,t%,trw,f1%); ' low-pass differentiator
+                case t% = 7 then FiltCreate(-1,7);  ' Differentiator
+                else    Message("FIR Filter error|Incompatible filter type requested\n\nFunction firfiltch% only designed to handle low, high and band pass");  return -3   
+            endcase
+            fch% := view(vw%).FiltApply(-1,0,ch%,stt,endt,1);
+            If fch% <0 then
+                Message("Filter error!|\nError in applying filter between %g and %g\n\n" + queinf$(vw%,ch%) + "\n\n",ch%,stt,endt);
+                return -3;
+            else
+                return fch%; ' handle of new channel created
+            endif
+        endif
+    endif
+end
+' ----------------------------------------------------------------------
+Proc res(indx%,fonch%,pkch%,fch%);   ' Calculate results based on event times (index of que%[, force onset events channel, peak force events channel, force wave channel);
+var i%;             ' Looping variable
+var t;              ' Returned times
+Var mkcode%[4];     ' Array for marker codes
+Var tdiff;          ' Difference in times between script and manual times
+if settn[3] = 1 then ' If force onset active
+    for i% := 0 to MemGetItem(fonch%,0) - 1 do   ' For each force onset marker found, add time and values to array
+        t := MemGetItem(fonch%,i% + 1,mkcode%[]);
+        If mkcode%[1] > 0  then results[indx%][mkcode%[0] - 1][mkcode%[1] - 1] := t;    endif' Add times to results array; index 0: script, 1: manual
+    next
+    for i% := 0 to que%[indx%][3] - 1 do
+        if results[indx%][i%][1] > 0 then   ' Manual check times present from script times
+            tdiff := (results[indx%][i%][1] - results[indx%][i%][0]) * 1000; ' Find difference between manual and script times (ms)
+            results[indx%][i%][0] := results[indx%][i%][1]; ' Set times to manual times
+            results[indx%][i%][1] := tdiff; ' Set index 1 to difference
+        else
+            results[indx%][i%][1] := 0; ' Set index 1 to 0 (no change from script)
+        endif
+        If results[indx%][i%][0] > 0 then results[indx%][i%][2] := ChanValue(fch%,results[indx%][i%][0]);   endif  ' and force value at that time
+    next
+endif
+if settn[19] = 1 then ' If peak force active
+    for i% := 0 to MemGetItem(pkch%,0) - 1 do   ' For each peak force marker found, add time and values to array
+        t:= MemGetItem(pkch%,i% + 1,mkcode%[]);
+        If mkcode%[1] > 0  then results[indx%][mkcode%[0] - 1][mkcode%[1] + 2] := t;    endif' Add times to results array; index 0: script, 1: manual
+    next
+    for i% := 0 to que%[indx%][3] - 1 do
+        if results[indx%][i%][4] > 0 then   ' Manual check times present from script times
+            tdiff := (results[indx%][i%][4] - results[indx%][i%][3]) * 1000; ' Find difference between manual and script times (ms)
+            results[indx%][i%][3] := results[indx%][i%][4]; ' Set times to manual times
+            results[indx%][i%][4] := tdiff; ' Set index 1 to difference
+        else
+            results[indx%][i%][4] := 0; ' Set index 4 to 0 (no change from script)
+        endif
+        If results[indx%][i%][3] > 0 then results[indx%][i%][5] := ChanValue(fch%,results[indx%][i%][3]);   endif  ' and force value at that time
+    next 
+endif
+for i% := 0 to que%[indx%][3] do   ' For each of the expected reps, find dependent variables
+    if (settn[3] = 1 and settn[19] = 1 and results[indx%][i%][0] > 0 and results[indx%][i%][3] > 0) then   ' Force onset and peak times included in analysis and found
+        results[indx%][i%][6] := results[indx%][i%][5] - results[indx%][i%][2] ;    ' Local peak force (peak force - onset force)
+        if settn[23] = 1 then ' Do ROFD calculations selected
+            results[indx%][i%][7] := rofd(que%[indx%][0],fch%,results[indx%][i%][0],results[indx%][i%][3],results[indx%][i%][2],results[indx%][i%][5],settn[24],settn[25],settn[26],settn[27],que%[indx%][4],0); ' ROFD
+            results[indx%][i%][8] := rofd(que%[indx%][0],fch%,results[indx%][i%][3],results[indx%][i%][3] + settn[28],results[indx%][i%][5],results[indx%][i%][2],settn[24],settn[25],settn[26],settn[27],que%[indx%][4],1); ' RORelax
+        endif   
+    endif
+next
+end    
+
+' ----------------------------------------------------------------------
+func finanal%() ' Analysis finished: currently does nowt much
+var i%,j%,k%;   ' Counting variables
+var fl%;        ' Handle of file to write to
+Var res%;       ' Handle of results view to write to
+res% := FileOpen("*.csv",8,1,"Save results to file");
+if res% < 1 then
+    if res% = -1531 then return Query("Target file open error!|File save error!\n\nRESULTS NOT SAVED\n\nThe selected file may already be open","&Retry","&Discard results") * -1;   endif
+    return Query("Warning!|Results not saved\n\nALL RESULTS FROM QUED ITEMS WILL BE LOST","Save","Discard results") * -1;
+endif
+view(res%).print("Results generated by script: %s written by %s\nGenerated at: %s %s\n\n",view(app(3)).WindowTitle$(),author$,Date$(2,3,3,2," "),Time$(1,7,0,":"));
+view(res%).print("Settings:,%g\nSee manual for details\n\n",settn[]);   ' Write settings
+view(res%).Print("%s\n",reslabel$[]);   ' Write column headers
+for i% := 0 to quen% - 1 do    ' For each qued item
+    view(res%).Print("%d,%s,%d: %s",i%,view(que%[i%][0]).WindowTitle$(),que%[i%][0],view(que%[i%][0]).ChanTitle$(que%[i%][1]));
+    for j% := 0 to que%[i%][3] - 1 do   ' For each rep
+        if j% > 0 then view(res%).Print(",,");  endif  ' Empty columns for file and channel
+        view(res%).Print(",%d,%.6f\n",j% + 1,results[i%][j%][]);
+    next
+next
+FileClose();
+return 1;
+end;
+' ----------------------------------------------------------------------
+func leaveall%()    'quits program 
+Var lvall%;			' Quit script?
+var sv%;            ' Whether to save settings
+var i%;             ' Looping variable
+lvall% := Query("Quit script?|Quit?","&Yes","&No");
+if setflag% = 1 then
+    sv% := Query("Settings not saved|Changes to settings have not been saved\n\nSave before closing?");
+    if sv% = 1 then setn%();    endif
+endif
+If lvall% Then
+    FilePathSet(initpath$,0);   ' restore to where it was before script was run
+    halt
+Else
+    Return 1;
+EndIf
+End;
+' ---------------------------------------------------------------------
+func queinf$(vw%,ch%); ' Create string to add to error messages with details of the que item being analysed
+return "File: " + WindowTitle$() + "\nChannel: " + str$(ch%) + " " + ChanTitle$(ch%);
+end

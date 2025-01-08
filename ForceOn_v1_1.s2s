@@ -1,0 +1,213 @@
+' Functions to identify force onsets
+
+'Version info
+' v1.0      ' Functions separated from EMD_calc script
+' v1.1      ' 3 pass search for force onset implemented
+
+'================== DEBUGGING AND DEVELOPMENT NEEDED ===========================================================
+
+'================== Global constant and variable declaratoins  =================================================
+
+' ---------------------------------------------------------------------
+func forceonset%(vw%,fch%,diffch%,st,endt,r%,hl%,mint,hys,con%,flcor,fltw,maxrep%,db%,qset[]); ' Run search for for onset 
+'(view and channel to search, start and end times,expected reps, high/low going, min time between threshold crossings, hysteresis, number of consecutive threshold required, 
+' filter corner frequency and transition width, maximum number of reps script can handle, debug on (1) or off (0))
+' Quiescent search settings (SD multiple, quiescent search window size, time increment, range, hysteresis, min time for threshold crossings)
+var i%,j%,k%;       ' looping variables
+var evch%;          ' Handle of event channels created
+
+If db% = 1 then PrintLog("\nForce onset\n===========\nForce channel: %d: %s\n",fch%,view(vw%).ChanTitle$(fch%));   endif;   ' DEBUG
+evch% := fthscan% (vw%,fch%,hl%,r%,st,endt,mint,hys,con%,maxrep%,db%);  ' Find lowest level threshold that can be set that meets all criteria
+if evch% <= 0 then return -2;   endif   'Failed to find expected number of approximate onsets
+if fqsdth(vw%,fch%,evch%,st,qset[],hl%,db%) < 0 then return -4; endif  ' >>>>>> ADD THESE VALUES TO SETTINGS
+if fslopezero(vw%,fch%,diffch%,st,endt,evch%,fltw,flcor) < 0 then return -4; endif
+return evch%;
+end
+' ---------------------------------------------------------------------
+func fthscan%(vw%,ch%,hl%,n%,t1,t2,minx,hy,mincl%,maxrep%,db%)  ' Find a threshold that returns meets several criteria and return the handle of an event channel marking the onsets obtained at that threshold 
+'(view, channel to search, whether high (1) or low (0) going, number of reps expected, start and end times, minimum crossing time, hysteresis, min size of clusters to be accepted
+' maximum number of reps script can handle, debug on (1) or off (0))
+' Criteria:
+'   * Returns the correct number of reps 
+'   * Reps occur in clusters of at least the minimum size
+'   * Max/ min time gaps are within tolerances
+const minmaxtn% := 21;                      ' Number of time windows to use in max/ min scan (use odd numbers to keep median simple)
+Var minmaxtsz := maxtime(ch%) / minmaxtn%;  ' Size of time windows for max/min scan
+Var minmaxwin[minmaxtn%][2];                ' Array of min (0) and maximum (1) values in channel
+Var chmedmin,chmedmax;                      ' Median minimum and maximum in channel
+Const thn% := 50;                           ' Number of treshold levels to use   ' >>>>>> ADD THESE VALUES TO SETTINGS
+Var cluster%, starti%;                      ' Number of items in a cluster, starting index of cluster
+Var thinc;                                  ' Amount to increment threshold steps in      
+Var th, thstart, crossn%;                   ' Value threshold set at, initial threshold and number of crossings found at that level
+Var expn% := -1;                            ' Number of thresholds that return the expected number of reps (start at -1 as increases by one before each pass)
+Var onch%, mkcode%[4];                      ' Marker channel for onsets, array for marker codes
+Var hcch%, hcpos, hc%, hcst$;               ' Channel and position of horizontal cursor 1 if we need to borrow it, cursor number if we have to creat a new one and cursor label for threshold search
+Var thcross[thn%][maxrep%+1];               ' Array of index of thresholds set (0) and the times of those crossings (1..n)
+Var i%,j%, k%;                              ' Looping variables
+Var tht, swst;                              ' Time threshold crossing are recorded at, time the search window starts at
+Var vwtmp% := view();                       ' What view is set to when funciton called
+Const maxsl:= 0.4, minsl := 0.002;          ' Maximum and minimum slope ' >>>>>> ADD THESE VALUES TO SETTINGS
+Const suggest1$ := "\n -> Check number of reps\n";
+Const suggest2$ := "\n -> Check for large noise spikes and rerun with a time window ommitting these\n";
+View(vw%);
+' ~~~~~ Get channel range avoiding outliers
+For i% := 0 to minmaxtn% -1 do
+    minmaxwin[i%][0] := ChanMeasure(ch%,9,i% * minmaxtsz,(i%+1) * minmaxtsz);   ' Get minimums
+    minmaxwin[i%][1] := ChanMeasure(ch%,8,i% * minmaxtsz,(i%+1) * minmaxtsz);   ' Get maximums
+next
+ArrSort(minmaxwin[][0],0);    ArrSort(minmaxwin[][1],1);    ' Sort ascending and descending respectively
+chmedmin := minmaxwin[round(minmaxtn% * 0.2)][0];    ' Take 20th %tile
+chmedmax := minmaxwin[round(minmaxtn% * 0.2)][1];    ' Take 20th %tile
+thinc := (chmedmax - chmedmin) / thn%;
+' ~~~~~ Fill array of thresholds and number of threshold crossings for thresholds across range
+if HCursor(1) then 'if horizontal cursor 1 already exists, get the position so we can borrow it an put it back later
+    hcch% := HCursorChan(1);
+    hcpos := hcursor(1);
+    hc% := 1;
+else
+    hc% := HCursorNew(ch%);
+endif
+hcst$ := "hcursor(" + Str$(hc%) + ")";
+Measurex(102,0,"Cursor(0)");    
+onch% := MeasureToChan(0,"ForceOn",5,8-hl%,ch%,minx,hcst$,hy); 
+If onch% < 0 then Message("Unable to create memory channel|Error in creating memory channel\n\n" + queinf$(vw%,ch%) + "\n\n");  return onch%;   endif
+If hl% = 0 then 'Make thinc -ve and start at max if low-going
+    thinc *= -1;  
+    thstart := chmedmax;
+else    ' Keep thinc +ve and start and min
+    thstart := chmedmin;    
+endif;  
+If db% = 1 then   PrintLog("\nDEBUG: Initial threshold search\nchmedmin:\t%.4f\nchmedmax:\t%.4f\n1st Threshold:\t%.3f\nthinc:\t%.3f\n\nThresh n\tThreshold\tCrossings\n",chmedmin,chmedmax,thstart,thinc);    endif' #### DEBUG
+th := thstart;
+For i% := 0 to thn% -1 do   ' Fill array with threshold indexes and threshold crossing times 
+    th := thstart + i% * thinc;
+    HCursor(hc%,th,ch%);
+    crossn% := process(t1,t2,1,0,onch%);
+    If db% = 1 then    PrintLog("%d\t%.3f\t%d\n",i%,th,crossn%); endif   ' #### DEBUG
+    if crossn% = n% then    ' If got expected number of crosssings, add details to array
+        expn% += 1;
+        thcross[expn%][0] := i%;    
+        for j% := 1 to crossn% do
+            thcross[expn%][j%] := MemGetItem(onch%,j%);
+        next
+    endif
+next
+if expn% < n% - 1 then ' Failed to find at least enough threshold crossing to make up one cluster (-1 since expn% is index of array)
+    Message("Threshold identification error|Only %d thresholds returned the expected number of reps (%d)\nMinimum cluster size is %d\n\nUnable to analyse force onsets\n\n" + queinf$(vw%,ch%) + "\n\n" + suggest1$ + suggest2$,expn% + 1,n%,mincl%); 
+    if hcch% > 0 then HCursor(1,hcpos,hcch%);   ' If we borrowed hcursor 1, put it back where we found it
+    else HCursorDelete(hc%);    ' else bin the one we created
+    endif   
+    return -3;  
+endif   
+' ~~~~~ Process array as clusters, scan for first thrshold where clusters are at least the minimum length and time differences are within range
+For i% := 1 to n% + 1 do ' Differentiate and take absolute times
+    ArrDiff(thcross[:expn%][i%]);
+    abs(thcross[:expn%][i%]);
+next        
+i% := 0;
+repeat
+    repeat
+        cluster% += 1;   
+        i% += 1;
+    until thcross[i%][0] - thcross[i% - 1][0] <> 1 or i% = expn%; ' non-consecutive thresholds or got to end
+    if cluster% >= mincl% then  ' If cluster is at least of the minimum size to accept
+        for j% := starti% to starti% + cluster% -1 do
+            if (thcross[j%][max(thcross[j%][1:n%]) + 1] <= maxsl and thcross[j%][min(thcross[j%][1:n%]) + 1] >= minsl) then ' Found a threshold that meets criteria
+                th := thstart + thcross[j%][0] * thinc;
+                If db% = 1 then    PrintLog("Initial threshold set at: %.3f\n",th); endif   ' #### DEBUG 
+                HCursor(hc%,th,ch%);
+                MemDeleteItem(onch%,-1);    ' Delete existing markers
+                swst := t1;
+                ArrConst(mkcode%[],1);  ' Initialise index 1 as 1 (first rep) and set index 2 to 1 to flag as set by script
+                repeat
+                    tht := ChanSearch(ch%,8 - hl%,swst,t2,th,hy,minx);
+                    if tht > 0 then MemSetItem(onch%,0,tht,mkcode%[]);  endif
+                    mkcode%[0] += 1; 
+                    swst := tht;    ' Start from last threshold crossing
+                until tht < 0;  'Search failed
+                crossn% := MemGetItem(onch%,0);
+                If crossn% <> n% then Message("Threshold identification error|Error in identifying correct threshold\nExpected %d reps, set threshold (%.3f) returned %d%s\n\n"+ queinf$(vw%,ch%) + "\n\n",n%,th,crossn%); 
+                    if hcch% > 0 then HCursor(1,hcpos,hcch%);   ' If we borrowed hcursor 1, put it back where we found it
+                    else HCursorDelete(hc%);    ' else bin the one we created
+                    endif   
+                    return -2;  
+                endif
+                if hcch% > 0 then HCursor(1,hcpos,hcch%);   ' If we borrowed hcursor 1, put it back where we found it
+                else HCursorDelete(hc%);    ' else bin the one we created
+                endif   
+                view(vwtmp%);   ' Restore view to what it was when function was called
+                If db% = 1 then ' #### DEBUG: FIRST PASS ONSETS
+                    PrintLog("First pass force onset times\n");
+                    for i% := 1 to MemGetItem(onch%,0) do
+                        PrintLog("%d\t%.5f\n",i%,MemGetItem(onch%,i%));   
+                    next
+                endif;
+                return onch%;
+            endif
+        next
+    endif
+    starti% := i%; cluster% := 0; ' Reset counters
+until i% = expn%;
+Message("Approximate onset failure|Unable to find onset meeting criteria\n\n" + queinf$(vw%,ch%) + "\n\n\nCheck max/min slope (%.3f//%.3f)" + suggest1$ + suggest2$,maxsl,minsl);
+if hcch% > 0 then HCursor(1,hcpos,hcch%);   ' If we borrowed hcursor 1, put it back where we found it
+else HCursorDelete(hc%);    ' else bin the one we created
+endif   
+view(vwtmp%);   ' Restore view to what it was when function was called
+return -1;
+End
+' ---------------------------------------------------------------------
+Func fqsdth(vw%,ch%,ech%,st,set[],hl%,db%)  ' Function to refine force onsets using threshold crossing search with the threshold based on SD multiples of preceeding quiescent period
+' (View, search channel, event channel, start time, set[SD multiple, quiescent search window size, time increment, range, hysteresis, min time between onsets], 
+'high (1) or low (0) going, debug on (1) or off (0))
+Var ont, tht;           ' Onset time (as passed in event channel), threshold time (threshold crossing as set by SD of quiescent window)
+Var swet;               ' Search window end time
+Var i%, j%;             ' Counting variables
+Var sd[0]; resize sd[round((set[3] - set[1]) / set[2]) + 1];  ' Array for SDs
+Var meansd, winmean;    ' Mean SD of lowest set[6]% of means in array
+
+If db% = 1 then PrintLog("Quiescent Window event refinement\n\nEvent\tstart t\tend t\tSD\n");  endif; ' ##### DEBUG
+for i% := 1 to view(vw%).MemGetItem(ech%,0) do  ' For each event
+    ont := view(vw%).MemGetItem(ech%,i%);
+    swet := ont - set[3];   ' start at onset - search window
+    while swet + set[1] < ont do
+        if swet < st then 
+            Message("Quiescent period search error|Quiescent period search window starts before set start time\n\n" + queinf$(vw%,ch%) + "\n\n");
+            break;
+        else
+            sd[j%] := Chanmeasure(ch%,12,swet,swet + set[1]);            
+            If db% = 1 then PrintLog("%d\t%.5f\t%.5f\t%.5f\n",i%,swet,swet + set[1],sd[j%]);  endif; ' ##### DEBUG
+            j% += 1;
+        endif
+        swet += set[2];
+    wend
+    ArrSort(sd[]);  Arrsum(sd[:round((j% - 1) * (set[6] / 100))],meansd);    ' Take mean of lowest set[6]%
+    j% := 0;
+    If db% = 1 then PrintLog("\nMean of lowest %.2g%: %.5f\n\n",set[6], meansd);  endif; ' ##### DEBUG
+    winmean := Chanmeasure(ch%,2,ont - set[3],ont - set[3] * (set[6] / 100));   ' Get mean in first set[6]% of search window
+    If hl% = 0 then meansd *= -1;  endif    'Make meansd -ve
+    tht := ChanSearch(ch%,7 + hl%,ont,ont - set[3],winmean + meansd * set[0],set[4],set[5]);
+    if tht < 0 then Message("Quiescent window search error|Failed to find threshold crossing\n\n" + queinf$(vw%,ch%) + "\n\n");
+        break;
+    else
+        MemSetItem(ech%,i%,tht);
+    endif
+    If db% = 1 then PrintLog("Event: %d\nMean in window: %.5f\nmean SD: %.5f\nThreshold crosssing time: %.5f\n",i%,winmean,meansd,tht);   endif; ' ##### DEBUG
+next
+end
+' ---------------------------------------------------------------------
+Func fslopezero(vw%,fch%,diffch%,st,et,ech%,fltw,flcor)    ' Working backwards from marked events, find point where slope = 0 and amend event times to this 
+'   (view, waveform channel, start and end times, event channel, filter corner frequency and transition width)
+var tzero;      ' Time that dForce = zero
+var i%;         ' Looping variable
+var sw;             ' Size of search window 
+if fch% < 1 then return -3; 
+    else chanshow(diffch%);    ChanSelect(diffch%,1);    ChanTitle$(diffch%,"dForce");  ' Select created channel so its flagged for deletion when we tidy up
+    endif
+    for i% := 1 to MemGetItem(ech%,0) do
+        If MemGetItem(ech%,i%) < 2 then sw := MemGetItem(ech%,i%); else sw := 2; endif ' >>>> Modify this so that parameters can be set in settings dialogue  
+        tzero := ChanSearch(diffch%,7,MemGetItem(ech%,i%),MemGetItem(ech%,i%)-sw,0,0);  
+        If tzero < 0 then message("Slope zero search fail|Failed to find zero point within %f seconds of approximate onset (%d)\n\n" + queinf$(vw%,fch%) + "\n\n",sw,i%);
+        else MemSetItem(ech%,i%,tzero);    ' Move marker to new time
+        endif   
+    next
+end

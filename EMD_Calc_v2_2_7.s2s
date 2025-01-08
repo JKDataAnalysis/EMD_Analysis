@@ -1,0 +1,1155 @@
+'==================================================================
+' Script written by Jon Kelly
+' email: jon.kelly@ed.ac.uk
+'==================================================================
+' Script to extract temporal information from EMG and force data and to 
+' calculate EMD
+'
+' Version info
+' -----------------
+'
+' 0.1: Development of routines to do basic functions, e.g. opening the required time views and selecting channels
+' 0.2: Implementation of routines to find start and ends of EMG activity as basic threshold crossings
+' 0.3: Routines added to calculate CIs between identified threshold crossings
+' 0.4: Alternative routines added to do cross correlations to sine and cosine waves of specific frequencies
+' 0.5: Alternative routines added to implement TKEO analysis
+' 1.0: Script tidied up and set to only do TKEO analysis on EMG
+' 1.1: Option added to use force onset times as search area markers for EMG onset searches- Modified linear envelope 
+'       option on EMG retained
+' 1.2: Searching for force onset times added
+' 1.3: Restructuring of Main Proc
+' 2.0: Further restructuring and implementation of furhter force onset refinement using slope minimas
+' 2.1: TKEO function restructured and set to use physiologically realistic search windows based on force onest times
+' 2.2: TKEO funcion modified to give the option to search wider time windows if fail to find EMG onset in 
+'       physiologically realistic time windows
+' 
+' Still to be done!
+' -----------------
+'
+' Currently the time from the last marker to the end of the file is not passed for analysis. Currently this is
+' not an issue since the script currently only is designed to find the onsets of activity, but if its later expanded
+' to find 'offets' too then it will need to be amended
+'
+' Look at whether all filters should be FIR. Currently only the force filter is to avoid artefacts at the start of 
+' processing window. If this is changed then dialogues will need to be changed accordingly
+'
+' Look at changing dialogues units to ms where appropriate
+'
+' Look at outputting results to a text file;
+'       - File processed
+'       - Channels processed
+'       - Header with search parameters- structure script to give user option to either alter parameters or run another 
+'               file with same parameters
+'           If change parameters is selected, then a new header is written and/or option to create a new output file is 
+    '           provided
+'       - For each rep;
+'           - Force onset time
+'           - EMG onset time
+'           - EMD
+'
+' Modify analysis parameters dialogue to make it interactive, i.e. the filter parameter options are only enabled if the
+' 'omit filter' option is unchecked
+' 
+' Check again if there are any more variables that are now reduntant
+' 
+' Look at using routine to find trough of threshold crossing peak in EMG as well as force data
+'
+' Look at channel scaling in TKEO. The current figure appears to be right for the files so far processed but need to 
+' determine how this figure should be determined and set it accordingly. Funciton of; Channel amplitude, sample 
+' frequency?
+'
+' Get it to ask before deleting all cursors in dotkeo- use code from setcursors and move to a function
+'
+' Tidy up after self after setting EMG onsets by restoring EMG and force channels to view after have found EMG onset-
+'   probably should do this more generally, ie read channels visible into an array at the start and then reset them 
+'   before exiting
+'
+' Error handing required
+' ----------------------
+'
+' Look at how errors are handled throughout script. 1) Currently, most things will call leaveall. Check that where 
+' these are not fatal errors the default isn't to abort. 2) Look at whether some should allow the user to go back a 
+' step rather than restarting.
+' 
+' Look at how the resetting of default values is done. At the minute if values are changed in a dialogue box and then 
+' processing is repeated for another file, then the default values are set as initial values (certainly true for 
+' analysis parameters dialogue. 
+' 1) Change this so that if a user changes these values they stay set 2) Add default buttons to dialogues to restore 
+' default values
+'
+' Look at how error reporting is handled: should print details to log window and possibly put less into the 
+' message boxes
+'
+' Known bugs
+' ----------
+'
+' Cannot handle duplicate, virtual or memory channels because they are given the names in the 
+' format 8xx, 7xx and 4xx respectively. Channel exclusion list is set globally by exlist%
+'
+' If a channel has large amounts of noise in quiescent portions in the TKEO domain (ie can be a function of time or 
+' frequency) then a ' high SD is found so the multiple SD results in an unreasonably high threshold and therfore may 
+' miss the onset. This does not appear to be an issue for these sample files, but could theoretically be an issue for 
+' others. Look some more at using SD multiples for setting thresholds- e.g SD of sine wave is 1.41 x amplitude
+'
+' If there is substantial drift upwards in the baseline in the force channel, then the threshold set for the first pass will 
+' result in threshold crossing being found when the baseline drifts over the threshold rather than when the defelction
+' by the applied force occurs.
+'
+' Script testing required
+' -----------------------
+'
+' Check with other low-going force channels
+'
+' Check with noisey data from 'real' trials
+'
+' Check with trials with apparently clear EMG onset times with the addition of various noise signals
+'
+' Check that EMG onsets are still being found correctly with the introduction of force onset searches
+' 
+' Check that the EMG onset detection still works using the modified linear envelope approach now that the
+' script has been modified to allow the use of force onsets to determine search windows for EMG onset
+
+'===================================================================
+
+'===================================================================
+' Global consant declarations 
+'===================================================================
+Const arraymax%:= 4000;			                ' Maximum size of array to read/write blocks of data in	
+Const author$:="Jon Kelly: jon.kelly@ed.ac.uk"; ' Author contact details
+Const maxchan%:=32;                             ' Maximum number of channels allowed. This is basically arbitary and 
+                                                '   the script should be robust enough that it could be increased 
+                                                '   without creating any problems
+Const exlist%:= 16384+8192+2097152;             ' List of channel types to exclude (duplicate: 16384, memory: 8192, 
+                                                '   virtual: 2097152)
+Const maxtmpch%:=100;                           ' Maximum number of temporary channels (again this is arbitary and
+                                                '   could be changed without affecting the script- a smaller size would
+                                                '   produce smaller arrays which would theoretically be faster)
+
+'===================================================================
+'Global variable declarations
+'===================================================================
+Var chsel%[2];   	                ' Selected channels (EMG, Force)
+Var tmpch%[maxtmpch%];              ' Array for temporary channel handles
+'===================================================================
+' Main procedures
+'===================================================================
+
+' ----------------------------------------------------------------------
+Func Choosev(times%[]);	'Choose the time view to be used		(Array of time view handles)
+	Var title$;						' Variable to return view titles to
+	Var timetitle$[20];				' Array for time view titles
+    Var dummy%;						' Variable to return item selected in dialogue to
+    Var v%;                         ' Handle of time view selected
+    Var er%;                        ' Error codes
+    Var i%;                         ' Looping variable
+
+	For i% := 1 to times%[0] Do	' Fill an array with time view titles
+		View(times%[i%]);
+		title$ := Windowtitle$();
+		timetitle$[i%-1]:= title$;		' (timelist%[0]=No of time views)
+	Next
+	timetitle$[times%[0]] := "- New file -";	'Add new file option to list
+	DlgCreate("Time views already open!",0,0,0,0);
+	DlgText("Select time view",0,1);
+	DlgList(1,"",timetitle$[],(times%[0]+1),17,1);
+    DlgButton(0,"&Cancel");    DlgButton(1,"&Ok");
+	er% := DlgShow(dummy%);	
+	If er% < 1 Then	' user cancelled
+		return -1;
+    else
+        If dummy% = times%[0] Then	' new file selected
+            return 0;
+        Else
+            v% := times%[dummy%+1]; 'returns selected view (+1 since 0 is No of views)
+            return v%;        
+        EndIf
+    EndIf
+End
+
+' ----------------------------------------------------------------------
+Func getfile()
+    Var v%;    'handle of view opened
+
+	v% := FileOpen("",0,1);
+	If v% <= 0 Then
+	Message ("File open error!|No file opened!");
+		leaveall(0);
+    EndIf
+    Return v%;
+End
+
+' ----------------------------------------------------------------------
+Proc leaveall(s%)        'quits program (Flag whether succesfully completed threshold searches (0:no, 1: yes)
+	Var lvall%;			' Quit script?
+    
+    If s%<>1 then chbinquery();   endif  
+    tidyup(tmpch%[]);
+    lvall% := Query("Quit script?|Quit?","&Yes","&No");
+	If lvall% Then
+		halt
+	Else
+		main();
+	EndIf
+End
+
+' ----------------------------------------------------------------------
+Func checkfile(v%)	' Checks that opened file is appropriate (view handle to check)
+	Var waves%[100];    ' Dummy array for waveform channels
+	
+    View(v%).Chanlist(waves%[],exlist%+1+512);	' fill arary with waveform channel numbers ignoring excluded channel types
+    DoCase
+        Case waves%[0] < 2 Then
+            Message ("Incompatible file error!|A minimum of 2 waveform channels are required\nOnly %d found",waves%[0]);
+            v%:=-1;
+        Case waves%[0] > maxchan% Then
+            Message ("Incompatible file error!|%d waveform channels founds\n\nMaximum allowed is %d\n\nThis can be increased- speak to the script's author",waves%[0],maxchan%);
+            v%:=-2;
+        case waves%[Max(waves%[])]> maxchan% Then
+             Message ("Incompatible file error!|Channel number(s) out of range\n\nMaximum allowed channel number is %d\n\nThis can be increased- speak to the script's author",maxchan%);
+             v%:=-3;
+    endcase
+    Return v%;
+End
+
+' ---------------------------------------------------------------------
+Proc dlgch(w%[])    ' Create dialogue for channel selection (array of waverform channels)
+    Var waves$[maxchan%+1];    ' Array for EMG channel titles
+    Var i%;                    ' looping variables
+    
+    For i% := 0 to w%[0]-1 do
+        waves$[i%] := "Ch "+str$(w%[i%+1])+": "+ChanTitle$(w%[i%+1]);
+    Next
+    ArrMul(chsel%[],0);             ' Set array to null
+    chsel%[0]:=0; chsel%[1]:=w%[2]; ' set default values
+    DlgCreate("Please select channels for analysis",0,0,0,0);	
+    Dlglist(1,"EMG",waves$[:w%[0]]);
+    Dlglist(2,"Force",waves$[:w%[0]]);
+    DlgButton(0,"&Cancel");    DlgButton(1,"&Ok");
+End
+
+' ---------------------------------------------------------------------
+Func getch()		' Procedure to allow user to select channels for analysis 
+    Var waves%[maxchan%+1];   	' Dummy array for waveform channels +1 to allow for 0 index being used for number 
+                                '   of channels
+    Var er%:=0;                 ' Error codes
+    Var i%;                     ' Looping variables
+        
+    waves%[0] := Chanlist(waves%[],exlist%+1+512);  ' fill arary with waveform (1) and realwave (512) channel numbers 
+                                                    ' ignoring excluded channel types)
+    ChanHide(-1);   ' hide all channels
+    For i% := 0 to waves%[0]-1 do   ' make all included channels visible so user can see what they are picking from
+        ChanShow(waves%[i%+1]); 
+        Draw(0,maxtime());
+        Optimise(waves%[i%+1]);
+    Next
+    dlgch(waves%[]);
+    er% := DlgShow(chsel%[]);
+    If er% =0 Then 
+        leaveall(0);
+    else
+        If chsel%[0]=chsel%[1] then 
+            Message("Input error!|The same channels have been selected for different types"); 
+            return -1;
+        else
+            chsel%[0] := waves%[chsel%[0]+1]; ' Change to channel numbers rather than array index
+            chsel%[1] := waves%[chsel%[1]+1];
+            return 1;
+        endif
+    endif    
+End
+
+' ---------------------------------------------------------------------
+Proc getstend(ch1%,ch2%);   ' Procedure to get start and end times for analysis
+    Var st,et;      ' Start and end times   
+    Var er%:=0;     ' Error codes
+    Var maxt;       ' Maxtime in channels
+    
+    maxt:= MaxTime(ch1%);
+    if MaxTime(ch2%)<maxt then maxt:= MaxTime(ch2%);    endif   ' set to short of two channels
+
+    DlgCreate("Analysis start and end times",0,0);
+    DlgReal(1,"Start|10",0,maxt);
+    DlgReal(2,"End|10",0,maxt);
+    DlgButton(0,"&Cancel");    DlgButton(1,"&Ok");
+    er%:=DlgShow(st,et);
+    If er% = 0 Then leaveall(0); EndIf
+End
+
+' ---------------------------------------------------------------------
+Func filtch%(ch%,stt,endt,t%,m%,o%,f1%,f2%)    'Apply a filter to a channel (Channel to apply to, start/end times, 
+        'type of filter, model and order, frequencies)
+    Var fch%;       ' Handle of memory channel created
+    
+    If t%>1 and f1% <1 then ' Band-pass/stop with no second frequency
+        Message("Filter error!|Band pass or stop filter requested with no second corner specified");
+        return -1;
+    else
+        If f1%<1 then 
+            Message("Filter error!|No filter frequency specified"); 
+            return -2;
+        else
+            IIRCreate(-1,t%,m%,o%,f1%,f2%);     
+            fch% := IIRApply(-1,0,ch%,stt,endt);
+            If fch% <0 then
+                Message("Filter error!|\nError in applying filter to channel %d\nbetween %g and %g",ch%,stt,endt);
+                return -3;
+            else
+                return (fch%); ' handle of new channel created
+            endif    
+        endif
+    endif
+end
+
+' ---------------------------------------------------------------------
+Func firfiltch%(ch%,stt,endt,t%,trw,f1%)    'Apply a FIR filter to a channel (Channel to apply to, start/end times, 
+        'type of filter, transition width, corner frequency)
+    Var fch%;       ' Handle of memory channel created
+    
+    If t%>1 and f1% <1 then ' Band-pass/stop with no second frequency
+        Message("Filter error!|Band pass or stop filter requested with no second corner specified");
+        Return -1;
+    else
+        If f1%<1 then 
+            Message("Filter error!|No filter frequency specified"); 
+            return -2;
+        else
+            FiltCreate(-1,t%,trw,f1%);     
+            fch% := FiltApply(-1,0,ch%,stt,endt,1);
+            If fch% <0 then
+                Message("Filter error!|\nError in applying filter to channel %d\nbetween %g and %g",ch%,stt,endt);
+                return -3;
+            else
+                return fch%; ' handle of new channel created
+            endif
+        endif
+    endif
+end
+
+' ---------------------------------------------------------------------
+Proc addtobin(ch%);     ' Funciton to add channel to array for deletion (channel to add)
+    Var chn%;       ' Number of channels already in list
+    
+    While tmpch%[chn%]<>0 do' Find next available index
+        chn%+=1; 
+        If chn%>=maxtmpch% then
+            Message("Channel deletion error|Too many channels passed for deletion\n\nMax is %d",maxtmpch%);
+            leaveall(0);
+        endif    
+    Wend
+    tmpch%[chn%]:=ch%;
+End
+
+' ---------------------------------------------------------------------
+Proc tidyup(delchan%[]);     ' Delete unwanted channels
+    Var i%:=0;      ' Looping variable
+    Var er%,er$;    ' Error handles
+    Var chn%;       ' Number of channels found to delete
+    
+    While delchan%[chn%]<>0 do' Find number of channels flagged (assumes array is sequential)
+        chn%+=1; 
+    wend
+    while i% < chn% do   'done with while/wend rather than for/next so won't do if no channels flagged
+        er% := ChanDelete(delchan%[i%],0);
+        If er% <0 then
+            er$:="Channel deltetion error!|Failed to delete channel "+str$(delchan%[i%])+"/n/nQuit script?";
+            er%:=query(er$,"&Yes","&No");
+            if er%=1 then leaveall(0);   endif
+        else
+            delchan%[i%]:=0; 'reset array element of channels for deletion
+        endif
+        i%+=1;
+    wend
+End
+
+' ---------------------------------------------------------------------
+Func slopemin(ch%,st,et);   ' Read in array of data around thresholds, differentiate and find
+        ' slope minima (Source waverform channel to search for slope minimums, start and end times)
+    Var i%;                 ' Looping variable
+    Var t;                  ' Time returned by search
+    Var rdata[arraymax%];   ' Array to read data into
+    Var dn%;                ' Number of data points read
+    
+    if (et-st)/binsize(ch%)>arraymax% then
+        Message("Data read error!|Time window passed for slope minima analysis is too large for array limit");
+    else    
+        dn%:= ChanData(ch%,rdata[],st,et);
+        if dn%<1 then
+            PrintLog("Data read error between %.4f and %.4f\n",st,et);   
+            return -1;
+        else 
+            ArrDiff(rdata[]);
+            i%:=dn%-1;
+            Repeat 
+                i%-=1;
+            until i%<0 or rdata[i%]<0.001;
+            if i%<0 then
+                Message("Slope minima search failure!|Failed to find slope minima between %.4f and %.4f",st,et);
+                Return -2;
+            else    
+                return(i%*binsize(ch%)+st);
+            endif    
+        endif
+    endif
+End
+
+' ---------------------------------------------------------------------
+Proc tkeosums(rch%,wch%,t1,t2,b);   ' Procedure to read in an array of data from a channel, conduct TKEO analysis and 
+    '   write it to another channel (Channel to read from and to, start and end times for read, binsize of read channel)
+    Var rn%;                ' Number of data points read into array 
+    Var r[arraymax%];       ' Array to read data into
+    Var tk[arraymax%];      ' Array for Teager-Kaiser data
+    Var n%;                 ' Looping variable
+    Var er%;                ' Error codes
+    Var er$;                ' String for error messages
+    
+    
+    rn% := ChanData(rch%,r[],t1,t2);	' Read in data 
+    If rn% <1 Then
+        Message("Data read error!|Data read error in channel %d\nbetween %g and %g seconds",rch%,t1,t2);	
+        leaveall(0);	
+    endif
+    For n%:= 1 to rn%-2 do
+        tk[n%]:= pow(r[n%],2)-r[n%+1]*r[n%-1];
+    next    
+    er% := ChanWriteWave(wch%,tk[:rn%-1],t1);
+    If er% < 0 then 
+        er$:= "Channel write error!|Failed to write to channel at "+str$(t1-b)+ " seconds\nAttempting to write "+ str$(rn%)+" data points\n\nAbort analysis?";
+        er%:= Query(er$,"&Yes","&No"); 
+        if er% = 1 then leaveall(0); endif
+    endif
+end
+
+' ---------------------------------------------------------------------
+Proc dlgtkeo(); 'Procedure to create analysis parameter dialogue box
+    Var hpgpx:=1,hpgpy:=1;                      ' High-pass group xy positions
+    Var hpvx:=hpgpx+13;                         ' x offset of high-pass variable boxes
+    Var hpgpw:=hpvx+18,hpgph:=5;                ' High-pass group width and height
+    Var lpgpx:=hpgpx+33;                        ' Low-pass group offset with respect to high-pass group
+    Var lpvx:=lpgpx+2;                          ' x offset of low-pass variable boxes
+    Var lpgpw:=lpvx-15,lpgph:=5;                ' Width and height of high-pass group box
+    Var thgpx:=1,thgpy:=hpgpy+hpgph;            ' TKEO threshold group xy positions 
+    Var thvx:=thgpx+28;                         ' Threshold variable x position
+    Var thgpw:=thvx+12,thgph:=9;                ' Threshold group width and height
+    Var dlgw:=hpgpx+lpgpw+hpgpw+2, dlgh:=hpgpx+hpgph+thgph+1;   ' Width and height of dialogue box
+    
+    DlgCreate("TKEO parameters: EMG",0,0,dlgw,dlgh);
+    
+    DlgGroup("High-pass filter",hpgpx,hpgpy,hpgpw,hpgph);
+    DlgInteger(1,"Corner (Hz)|3",1,500,hpvx,hpgpy+1);
+    DlgInteger(2,"Order|3",1,6,hpvx,hpgpy+2);
+    DlgList(3,"Model","Butterworth|Bessel",2,hpvx,hpgpy+3);
+    DlgCheck(4,"Omit filter",hpvx-1,hpgpy+4);
+    
+    DlgGroup("Low-pass filter",lpgpx,hpgpy,lpgpw,lpgph);
+    DlgInteger(5,"|3",1,500,lpvx,hpgpy+1);
+    DlgInteger(6,"|3",1,6,lpvx,hpgpy+2);
+    DlgList(7,"","Butterworth|Bessel",2,lpvx,hpgpy+3);
+    DlgCheck(8,"Omit filter",lpvx-1,hpgpy+4);
+    
+    DlgAllow(0,0,toglfilt%);
+    
+    DlgGroup("TKEO threshold parameters",thgpx,thgpy,thgpw,thgph);
+    DlgReal(9,"SD multiple|2",1,50,thvx,thgpy+1);
+    DlgReal(10,"Quiescent window size (s)|7",0.01,10,thvx,thgpy+2);
+    DlgReal(11,"EMD minimum (s)|7",-1,10,thvx,thgpy+3);
+    DlgReal(12,"EMD maximum (s)|3",0,10,thvx,thgpy+4);
+    DlgReal(13,"Hysteresis",0,100,thvx,thgpy+5);
+    DlgReal(14,"Min threshold crossing time (s)",0.000001,5,thvx,thgpy+6);
+    
+    DlgButton(0,"&Cancel");    DlgButton(1,"&Ok");
+End
+' ---------------------------------------------------------------------
+Func toglfilt%(val%);   ' Toggle whether filter parameter dialogue items are enabled or not depending on 
+'   check box status
+    var v%;         ' value of check boxes currently set
+
+    v% := abs(DlgValue(4)-1);      'Set other dialogue items to opposite of checkbox
+    docase
+        case val% = 4 then DlgEnable(v%, 1, 2, 3);    'High-pass filter options
+        case val% = 8 then DlgEnable(v%, 5, 6, 7);    'Low-pass filter options
+    endcase;
+    return 1;
+End
+' ---------------------------------------------------------------------
+Proc chbinquery();  ' Checks whether channels should be binned
+    Var er%;                ' Error codes
+    Var i%;                 ' Counting variable
+    Var chn%:=0;            ' Number of channels flagged for deletion
+    Var delch%[maxtmpch%];  ' Array for channels
+    Var ch$;                ' Title of channel
+    Var x%,y%;              ' Position of channel list in dialogue
+    Var rwn%:=6,cw%:=25;    ' Number of rows per column for the chanel list, column width
+    
+    if ArrSum(tmpch%)>0 then 'As long as there are some channels
+        ArrSort(tmpch%[],1);    ' Sort array (it should be sequential anyway)
+        Repeat ' Find number of channels flagged 
+            chn%+=1; 
+        until tmpch%[chn%]=0 or chn%=maxtmpch%;
+        If chn%>0 then  ' ensure doesn't fall over if function is called with no channels to delete
+            resize delch%[chn%];
+            ArrConst(delch%[],1);
+            DlgCreate("Delete temporary channels",0,0,0,0);
+            DlgText("There were probelms in finding onsets\n\nPlease uncheck channel(s) NOT to be deleted",1,1);
+            For i%:=0 to chn%-1 do
+                ch$:="Channel "+str$(tmpch%[i%])+": "+ChanTitle$(tmpch%[i%]);
+                docase
+                    case ChanKind(tmpch%[i%])=1 then ch$+=" (Wave)"
+                    case ChanKind(tmpch%[i%])=5 then ch$+=" (Marker)"
+                endcase    
+                x%:=i%/rwn%*cw%+3;
+                y%:=i%-(i%/rwn%)*rwn%+1;
+                DlgCheck(i%+1,ch$,x%,y%+2);
+                ChanShow(tmpch%[i%]);
+            Next
+            DlgButton(0,""); DlgButton(1,"&Ok");
+            er%:=DlgShow(delch%[]);
+            If er% = 0 Then leaveall(0); EndIf
+            ArrMul(tmpch%[:chn%],delch%[:chn%]);
+            ArrSort(tmpch%[],1);
+        endif
+    endif
+End    
+
+' ---------------------------------------------------------------------
+func fthmin(ch%,n%,t1,t2,minx,hy)  ' Search for minimum level that threshold can be set at and still return the 
+    '   correct number of reps (channel to search, number of reps expected, start and end times, minimum crossing 
+    '   time, hysteresis)
+    Var inc:=1;                 ' Amount to increment threshold steps in      
+    Var chmean,chmax,chmin;     ' Mean, Max and Min of channel- used only to deterime if low or high-going
+    Var th, thx:=0, thn%;       ' Threshold level for searches, threshold crossing time, number of crossings found
+    Var st;                     ' Start time of search window
+    Const s:=100;               ' Max slope to accept as real (inc/s= change in threshold times between passes)
+    Var maxt:=inc/s;            ' Maximum expected change in times between passes
+    
+    chmean:=ChanMeasure(ch%,2,t1,t2);
+    chmax:=ChanMeasure(ch%,8,t1,t2);
+    chmin:=ChanMeasure(ch%,9,t1,t2);
+    th:=chmean;
+    repeat
+        st:=t1;
+        thn%:=0;
+        Repeat 
+            thx:= ChanSearch(ch%,7,st,t2,th,hy,minx,1);
+            st:=thx;
+            if thx>0 then   thn%+=1;    endif
+        until thx<0;
+        th+=inc;
+    until thn%=n%;  ' This is liable to give false +ves
+    th+=2*inc;
+    if th>chmax or th<chmin then
+        Message("Threshold search error!|Failed to find expected number of repetitions in force channel\n\nThreshold at %g",th);
+        leaveall(0);
+    endif    
+    Return th;
+End    
+
+' ---------------------------------------------------------------------
+Func findth(ch%,qst,qet,srst,sret,hy,minc,sdm)  ' Function to refine force onsets using threshold crossing search 
+    ' (Channel, start and end times for quiescent portion and search window, hysteresis, minimum crossing 
+    ' time, SD multiple)
+    Var mean,sd;    ' Mean and SD in window
+    Var ont;       ' Onset time
+    
+    mean := Chanmeasure(ch%,2,qst,qet);
+    sd:= Chanmeasure(ch%,12,qst,qet);
+    ont:=ChanSearch(ch%,7,srst,sret,mean+sd*sdm,hy,minc);
+    if ont<0 then
+        PrintLog("\nSearch failure between %.4f and %.4f in channel %d\n",srst,sret,ch%);
+        PrintLog("\tMean and SD taken between %.4f and %.4f\n",qst,qet);
+        PrintLog("\tThreshold: %.4g\n\tMean: %.4g\n\tSD: %.4g\n",mean+sd*sdm,mean,sd);
+        PrintLog("\tHysteresis: %.2f\n\tMinimum crossing time: %.4f\n\n",hy,minc);
+        return-1;
+    else 
+        return ont;
+    endif        
+end
+
+' ---------------------------------------------------------------------
+Func dotkeo%(fonch%,emgch%,ast,aet)   ' Function to do TKEO analysis on passed channel and find onsets
+        '   (Event channel with force onsets, EMG channel, start and end times for analysis)
+    Var qwin,emdmin,emdmax;         ' Size of quiescent window for calculations and maximum and minimum EMD times- 
+                                    '   these define the search window and position of qwin
+    Var hf%:=10,lf%:=50;            ' Frequency of high and low pass filters (TKEO)
+    Var ho%:=6,lo%:=6;              ' Order of high and low pass filters (TKEO)
+    Var hm%:=0, lm%:=0;             ' Model of high and low pass filters (TKEO)
+    Var hoff%:=0,loff%:=0;          ' High and low pass filters off (TKEO)
+    Var sdmul:=8;                   ' SD multiple for threshold finding (TKEO)
+    Var tkeoch%;                    ' Channel for TKEO data
+    Var qmean,qsd;                  ' Mean and SD in quiescent portion of channel (TKEO)
+    Var thresht;                    ' Time threshold crossing found at (TKEO)
+    Var hyst:=0,minc:=0.001;        ' Hysteresis and width for TKEO threshold searches
+    Var fch%;                       ' Channel for filtered data 
+    Var bins;                       ' Binsize of channel being analysed    
+    Var qst,qet,srst,sret;          ' Start and end times of quiescent windows and search windows
+    Var i%;                         ' Looping variable
+    Var thmkn%;                     ' Number of threshold crossing markers in channel
+    Var er%;                        ' Error codes
+    Var eonch%;                     ' Event channel for onset markers
+    Var done%;                      ' Flag if TKEO search was succesful (1) or not (0)
+    Var mk%[4];                     ' Event marker codes
+    Var cur1%,cur2%, mancur%;       ' Handle of cursors created (start, end, manual)
+    Var tmp;                        ' Temporary swapping variable if need to swap start and end times
+    Var msg$;                       ' String for messages    
+    
+    eonch%:=createvch%();
+    if eonch%<0 then leaveall(0);   endif
+    ChanTitle$(eonch%,"EMG_Onset");
+    qwin:= 0.5; emdmin:=10/1000.0;  emdmax:=100/1000.0;    ' Set defaults
+    dlgtkeo();  ' Set up TKEO dialogue box
+    er%:=DlgShow(hf%,ho%,hm%,hoff%,lf%,lo%,lm%,loff%,sdmul,qwin,emdmin,emdmax,hyst,minc);
+    If er% = 0 then leaveall(0); endif
+    '~~~~~ Create TKEO transform channel ~~~~~
+    fch% := filtch%(emgch%,ast,aet,1,hm%,ho%,hf%,0);  
+    if fch%<1 then
+        leaveall(0);
+    else
+        addtobin(fch%);
+        ChanTitle$(fch%,"FiltEMG");
+    endif    
+    bins:=BinSize(emgch%);               ' 
+    tkeoch%:=createtkeo%(fch%,ast,aet);
+    if tkeoch%<1 then 
+        leaveall(0);  
+    else
+        addtobin(tkeoch%);
+    endif
+    tkeoch% := filtch%(tkeoch%,ast,aet,1,lm%,lo%,lf%,0);  
+    if tkeoch%<1 then
+        leaveall(0);
+    else
+        addtobin(tkeoch%);
+        ChanTitle$(tkeoch%,"FiltTKEO");
+    endif    
+    ChanProcessAdd(tkeoch%,0); ' Rectify channel      
+    ChanTitle$(tkeoch%,"TKEO"+ChanTitle$(emgch%));
+    '~~~~~ Find onsets ~~~~~
+    thmkn% := MemGetItem(fonch%,0);
+    
+    For i% := 1 to thmkn% do
+        qet:= MemGetItem(fonch%,i%)-emdmax;
+        qst:=qet-qwin;
+        srst:= qet;
+        sret:=MemGetItem(fonch%,i%)-emdmin;
+        done%:=0;
+        repeat
+            thresht:=findth(tkeoch%,qst,qet,srst,sret,hyst,minc,sdmul);
+            If thresht<0 then
+                msg$:="EMG onset search failure!|Failed to find EMG onset within current EMG limits (";
+                msg$+=str$(emdmin*1000)+" and "+str$(emdmax*1000)+" ms)";
+                msg$+="\n\nAdjust cursors for modified search then click 'Set'";
+                msg$+="\n\nClick 'Skip onset' to omit this onset";
+                Message(msg$);  
+                er%:=cursspare%(3);
+                if er%=0 then ' User clicked cancel 
+                    Message("Cursor setting error!|Unable to set all cursors");   
+                    done%:=1;
+                else
+                    cur1%:=CursorNew(srst);    cur2%:=CursorNew(sret);  mancur%:=CursorNew(srst+(sret-srst)/2);
+                    er%:=emdmod(srst,sret,tkeoch%,cur1%,cur2%,mancur%);
+                    docase
+                    case er%=2 then     ' User hit skip
+                        done%:=1;   ' so will exit loop
+                        mk%[0]:=done%;   ' Flag as fail
+                        er%:=MemSetItem(eonch%,0,srst,mk%[]);    ' Set fail marker at search start time
+                    case er%=4 then    ' User hit manual    
+                        mk%[0]:=3;  ' Flag as manually set
+                        er%:=MemSetItem(eonch%,0,cursor(mancur%),mk%[]);    
+                        if er%<0 then 
+                        Message("Event setting error!|Failed to write event %d to channel %d at time %g",i%,eonch%,thresht); 
+                    endif 
+                        done%:=1;
+                    else 
+                        srst:=Cursor(cur1%); sret:=Cursor(cur2%);
+                        if sret<srst then   ' If having been set wrong way round, swap them
+                            tmp:=srst;
+                            srst:=sret;
+                            sret:=tmp;
+                        endif
+                        done%:=2;   ' Flag as having to have used adjusted limits
+                    endcase
+                endif    
+            else
+                mk%[0]:=done%;   ' Flag as succesfully found
+                er%:=MemSetItem(eonch%,0,thresht,mk%[]);    
+                if er%<0 then 
+                    Message("Event setting error!|Failed to write event %d to channel %d at time %g",i%,eonch%,thresht); 
+                endif 
+                done%:=1;
+            endif    
+        until done%=1;
+    next
+    Return eonch%; 
+End
+
+' ---------------------------------------------------------------------       
+func emdmod(st,et,ch%,sc%,ec%,mc%)   ' Create dialogue to modify search window (start and end times currently set, 
+'   search channel, handle of cursors(start, end, manual))
+    const win:=0.25;        ' Size of window either size of EMD min/max to display
+    Var btn%;               ' Number of button pressed
+    Var stin:=st, etin:=et; ' Initial start and end times
+        
+    ChanHide(-1);
+    ChanShow(ch%);
+    Draw(st-win,et-st+win*2);
+    CursorLabelPos(sc%,25);   CursorLabel(4,sc%,"Start");   
+    CursorLabelPos(ec%,25);   CursorLabel(4,ec%,"End"); 
+    CursorLabelPos(mc%,50);   CursorLabel(4,mc%,"Manual");
+    
+    repeat
+        btn%:= interact("Move cursors to start and of EMG onset search window",0x132,"","&Search again","S&kip onset","&Reset","&Manual");
+        if btn%=3 then cursor(sc%,stin);   cursor(ec%,etin);    endif
+    until btn%<>3;
+    return(btn%);
+end            
+
+' ---------------------------------------------------------------------   
+Proc dlgthrparam()    
+    DlgCreate("Threshold search parameters",0,0,0,0);    ' Get analysis parameters
+    DlgGroup("Threshold parameters",1,1,-1,3);
+    DlgReal(1,"Min time between crossings",0,5,0,2);
+    DlgReal(2,"Hysteresis",-10,10,0,3); 
+    DlgGroup("Filter parameters",1,5,-1,3);
+    DlgReal(3,"Transition width (Hz)",1,500,0,6);
+    DlgReal(4,"Corner Frequency (Hz)",1,2000,0,7);
+    DlgButton(0,"&Cancel");    DlgButton(1,"&Ok");
+End
+
+' ---------------------------------------------------------------------   
+Func createvch%()' Create event channel
+    Var ch%;    ' Handle of channel created
+    
+    ch% := MemChan(5,1);    
+    addtobin(ch%);
+    If ch% <1 then
+        Message("Channel creation error!|\nUnable to create event channel\n");
+        return -1;
+    else
+        return ch%;
+    endif
+end    
+
+' ---------------------------------------------------------------------   
+Func createtkeo%(ch%,st,et);  ' Create a channel of TKEO transform of passed channel (Channel to transform, start and 
+        '   end times)
+    Var t1,t2;  ' Start and end times of analysis
+    Var pch%;   ' Processing channel
+    Var bins;   ' Binsize of passed channel
+    
+    bins:=BinSize(ch%);
+    pch% := ChanNew(0,1,0,bins);
+    ChanTitle$(pch%,"TKEO_raw");
+    if pch% <1 then
+        Message("Channel creation error!|Error in creating new disk channel");
+        Return -1;
+    else
+        ChanScale(pch%,0.00001);   '0.00001);   
+        t1:=st;
+        repeat  ' Process all channel in chunks of size arraymax%
+            t2 := t1+bins*arraymax%;
+            if t2>Maxtime(ch%) then t2 :=Maxtime(ch%);  endif
+            tkeosums(ch%,pch%,t1,t2,bins);
+            t1:=t2-bins*2; '- bins*2 as misses last element of array
+        until t2>= Maxtime(ch%);
+        return pch%;
+    endif
+end    
+
+' ---------------------------------------------------------------------   
+Func invertch% (sch%)' Create channel for processing (Source channel)
+    Var vch%;   ' Virtual channel created
+    
+    vch%:=VirtualChan(0,"ch("+str$(sch%)+")*-1",sch%);
+    if vch%<0 then 
+        Message("Channel inversion error!|Errors occured in creating a virtual channel as an inversion of channel %d",sch%);
+    else    
+        addtobin(vch%);
+    endif
+    return vch%;
+End    
+
+' ---------------------------------------------------------------------
+Func hlgo%(ch%,t1,t2);    ' Check whether channel is high of low going
+    Var chmean,chmax,chmin;     ' Mean, Max and Min of channel- used only to deterime if low or high-going
+    
+    chmean:=ChanMeasure(ch%,2,t1,t2);
+    chmax:=ChanMeasure(ch%,8,t1,t2);
+    chmin:=ChanMeasure(ch%,9,t1,t2);
+    If abs(chmax-chmean)>abs(chmin-chmean) then   
+        Return 0; ' high-going
+    else
+        return 1; ' low-going
+    endif   
+End 
+
+' ---------------------------------------------------------------------   
+Func dlgstet(ch%[]);    'Dialogue to get start and end times and number of reps for analysis (Channels to be 
+        ' analysed)
+    Var i%;     ' Looping variable
+    Var maxt;   ' Maximum time in channel
+    
+    maxt:=MaxTime(ch%[i%]);
+    for i%:=1 to len(ch%[])-1 do  ' Use length of shortest channel as max time
+        if MaxTime(ch%[i%])<maxt then maxt:=MaxTime(ch%[i%]);   endif ' <= or will stay at intitial value if
+    next
+    DlgCreate("Analysis parameters",0,0,0,0);
+    DlgGroup("Start/ end times",1,1,-1,4);
+    DlgReal(1,"Start|10",0,maxt,0,2);
+    DlgReal(2,"End|10",0,maxt,0,3);
+    DlgText("(Default is whole file)",8,4);
+    DlgGroup("Expected repetitions",1,5.5,-1,2);    
+    DlgInteger(3,"Number",1,100,0,6.5);
+    DlgButton(0,"&Cancel");    DlgButton(1,"&Ok");
+    Return maxt;
+End    
+
+' ---------------------------------------------------------------------   
+Proc dlgforce()    ' Create force search parameters dialogue
+    DlgCreate("Force onset refinement search parameters",0,0,0,0);    ' Get analysis parameters
+    DlgReal(1,"Min time between crossings (s)",0,5,0,1);
+    DlgReal(2,"Hysteresis",-10,10,0,2); 
+    DlgReal(3,"SD multiple",0,100,0,3);
+    DlgReal(4,"Quiescent window size (s)",0,60,0,4);
+    DlgGroup("Gaps to approx onset",0,5,0,4);
+    DlgText("Threshold",12,6);
+    DlgText("Slope min",29,6);
+    DlgReal(5,"Before (s)",0,10,13,7);
+    DlgReal(6,"After (s)",0,10,13,8);
+    DlgReal(7,"",0,10,30,7);
+    DlgReal(8,"",0,10,30,8);
+    DlgButton(0,"&Cancel");    DlgButton(1,"&Ok");
+End       
+' ---------------------------------------------------------------------   
+Func setcursors(ch%[],ch$[])    ' Set cursors at thresholds in event channels (Event channel handles, labels 
+    '   for cursors in each channel)
+    Var mn%;                        ' Number of markers found in channel
+    Var i%,j%;                      ' Looping variables
+    Var mt;                         ' Time marker set at
+    Var erc%:=0;                    ' Count of errors returned (-ve)
+    Var c%,cp,cf$;                  ' Cursor number, cursor position, cursor format string
+    Var nch%;                       ' Number of channels passed
+    Var ncurset%:=0;                ' Number of cursors to set
+    Var er%;                        ' Error codes
+    
+    ArrSort(ch%[]);
+    nch%:=len(ch%[]);
+    cp:=10/nch%;    ' Set initial cursor position as 10% of the way down the first channel
+    for i%:=0 to nch%-1 do  ' Get number of cursors to set
+        ncurset%+= MemGetItem(ch%[i%],0);
+    next
+    if ncurset% >9 then ' Can only set a maximum of 9
+        Message("Cursor setting error!|Insufficient cursors available");
+        return -1;
+    else
+        er%:=cursspare%(ncurset%);
+        if er%=0 then
+            return -2;
+        endif
+        if er%=1 then
+            for i%:=0 to nch%-1 do
+                cf$:=ch$[i%]+" (%n) %.5p";
+                if ch%[i%]>0 and chankind(ch%[i%])>=2 and chankind(ch%[i%])<=8 then
+                    mn%:= MemGetItem(ch%[i%],0);
+                    For j%:= 1 to mn% do
+                        mt:=MemGetItem(ch%[i%],j%);
+                        if mt<0 then erc%-=1; endif
+                        c%:= CursorNew(mt,-1);
+                        if c%<1 then
+                            Message("Unable to set all cursors!|Insufficient cursors available to set cursors at all onset times");
+                        else    
+                            CursorLabelPos(c%,cp);
+                            CursorLabel(4,c%,cf$);
+                        endif    
+                    next    
+                    cp+=100/nch%;   'increment by proportion of screen used by each channel
+                endif
+            next    
+        endif
+        return erc%;
+    endif
+End    
+' ---------------------------------------------------------------------   
+func cursspare%(nset%); ' Check if sufficient cursors are spare and delete existing ones if not (number to set)
+    var i%;         ' Looping variable
+    var nex%:=0;    ' Number of cursors existing
+    var er%:=0;     ' Error codes
+    Var cur%[9];    ' Array for cursor handles
+    Var delcur%[9]; ' Cursors to delete
+
+    for i%:= 1 to 9 do  ' Get number of cursors already set
+        if CursorExists(i%)=1 then;
+            cur%[nex%]:=i%;
+            nex%+=1;
+        endif    
+    next    
+    ArrConst(delcur%[],1);  ' set to all selected as default
+    If nset%+nex%>9 then  ' Not enough cursors available
+        Repeat
+            DlgCreate("Insufficient cursors available",0,0,0,0);
+            DlgText("Uncheck curors NOT to be deleted",1,1);
+            for i%:=0 to nex%-1 do
+                Dlgcheck(i%+1,"Cursor "+str$(cur%[i%]),1,i%+2);
+            next
+            er%:=dlgshow(delcur%[]);
+            if er%=1 then
+                if nset%+nex%-ArrSum(delcur%[]) >9 then
+                    Message("Selection error!|Insufficient cursors selected for deletion");
+                    er%:=-1;
+                else
+                    for i%:=0 to 8 do
+                        if delcur%[i%] = 1 then CursorDelete(cur%[i%]);  endif
+                    next    
+                endif
+            endif    
+        until er%>=0;
+    endif
+    return(er%);    
+end        
+' ---------------------------------------------------------------------   
+Func logresult(ch%[])   ' Write results to log window (Event channel handles)
+    const miss$:="------";  ' String to replace missing data
+    Var mn%;                ' Number of markers found in channel
+    Var i%;                 ' Looping variable
+    Var mt[2];              ' Time marker set at (force/EMG)
+    Var mc%[4];             ' Array for marker codes
+    
+    if chankind(ch%[0])<2 or chankind(ch%[0])>8 or chankind(ch%[1])<2 or chankind(ch%[1])>8 then
+        return(-1);
+    endif    
+    View(loghandle()).TabSettings(15);
+    PrintLog("Force (s)\tEMG (s)\tEMD (ms)\n");
+    for i%:=1 to MemGetItem(ch%[0],0) do
+        mt[0]:=MemGetItem(ch%[0],i%);
+        PrintLog("%-.5f\t",mt[0]);   ' Force onset times
+        mt[1]:=MemGetItem(ch%[1],i%,mc%[]);                
+        docase
+            case mc%[0]=0 then  PrintLog("%-.5f\t%-.3f\n",mt[1],(mt[0]-mt[1])*1000); 'EMG onset and EMD
+            case mc%[0]=1 then  PrintLog("%-s\t%-s\n",miss$,miss$);   ' EMG missing
+            case mc%[0]=2 then  PrintLog("%-.5f\t%-.3f ",mt[1],(mt[0]-mt[1])*1000); 'EMG set outside of initial limits
+                                PrintLog("<-- WARNING: Outside of expected limits\n");
+            case mc%[0]=3 then  PrintLog("%-.5f\t%-.3f ",mt[1],(mt[0]-mt[1])*1000); 'EMG set manually
+                                PrintLog("<-- NOTE: EMG set manually\n");
+            endcase    
+    next    
+    return (0);
+End 
+' ---------------------------------------------------------------------   
+Func gettime(); ' Get a time view to work with
+    Var er%;            ' Error codes
+    Var timelist%[30];	' Array for list of time views (assumes no more than 30)
+    Var v%;             ' Handle of time view selected
+
+    Repeat 
+        Viewlist(timelist%[], 1);	' Are there any time views already open
+        If timelist%[0] > 0 Then  'There are some time views
+            v%:= choosev(timelist%[]);
+            docase
+                case v%=-1 then leaveall(0);     ' User cancelled
+                case v%=0 then v%:=getfile();    ' New file selected
+            endcase    
+        Else
+            v%:= getfile();		' No time views open go and get one
+        EndIf
+        v%:= checkfile(v%);
+    until v%>0;
+    Return v%;
+End 
+
+' ---------------------------------------------------------------------   
+Func ffind(fch%,evch%,minc,hy,st,et,thl); ' Initial pass to find rough force onsets (force channel, event channel to write to
+        ' threshold level, minimum crossing time, hysteresis, start and end times, threshold level)
+    Var tht, thn%;  ' Threshold crossing level, time crossing found at, number of thresholds found
+    Var t1;         ' Time for start of threshold searches
+    
+    t1:=st;
+    Repeat
+        tht:= ChanSearch(fch%,7,t1,et,thl,hy,minc,1);
+        PrintLog("tht:  %.5f\tt1: %.5f\tet: %.5f\tthl: %.5f\thy: %.5f\tminc: %.5f\n",tht,t1,et,thl,hy,minc);    ' >>>> TEMP
+        If tht>0 then 
+            MemSetItem(evch%,0,tht);
+            thn%+=1;
+            t1:=tht;
+        endif
+    until  tht <0;  ' no more crossing found
+    return thn%;
+End
+
+' ---------------------------------------------------------------------   
+Func doforce%(fch%,st,et,r%); ' Do analysis of force channel (force channel, start and end times, No reps)
+    Var mincross;               ' Minimum time that waveform must cross threshold for
+    Var hyst;                   ' Hysteresis for threshold crossing
+    Var fonch%;                 ' Channel for onset events
+    Var er%:=0, er$;            ' Error codes and string for error messages
+    Var rn%;                    ' Number of reps found
+    Var thl;                    ' Threshold level
+    Var tw,f;                   ' Filter parameters: transition width and corner frequency
+    Var ont;                    ' Onset time retunred
+    
+    Var smgappre,thgappre;      ' Gap between start of approximate onset and end of window for mean and SD calculations 
+    Var smgappost, thgappost;   ' Gap after approx onset to include in search (in case approx search is very close)
+                                '   - both above for sm: slope minima and th: threshold
+    Var winsz;                  ' Size of to calcualate mean and SD in
+    Var sdmul;                  ' Number of SD multiples to use for threshold in force onset search
+    Var qst,qet;                ' Start and end times of quiescent portion of channel to search for means and SDs
+    Var srst,sret;              ' Start and end times of search window
+    Var thmkn%;                 ' Number of threshold markers found
+    Var i%;                     ' Looping variable
+    
+    mincross:=0.5;  hyst:=0;    tw:=25; f:=10; 'set defaults
+    dlgthrparam();
+    er%:=DlgShow(mincross,hyst,tw,f);
+    If er% = 0 then leaveall(0); endif
+'################################################
+  
+  '  fch%:=firfiltch%(fch%,st,et,2,tw,f);   '>>>> RESTORE
+    ChanProcessAdd(fch%,3,0.1); ' >>>> TEMP
+    'if fch%<1 then                          '>>>> RESTORE
+    '    leaveall(0);                        '>>>> RESTORE
+    'else                                    '>>>> RESTORE
+    '    addtobin(fch%);                     '>>>> RESTORE
+    '    ChanTitle$(fch%,"FiltForce");       '>>>> RESTORE
+    'endif                                   '>>>> RESTORE
+'################################################
+
+    fonch%:=createvch%();
+    if fonch%<0 then leaveall(0);   endif
+    ChanTitle$(fonch%,"ForceOnst");
+    repeat
+        if hlgo%(fch%,st,et)=1 then fch%:=invertch%(fch%);  endif ' Invert channel if low-going
+        '~~~~ initial search ~~~~
+        thl:=fthmin(fch%,r%,st,et,mincross,hyst);   ' Find lowest threshold that can be set
+        rn%:=ffind(fch%,fonch%,mincross,hyst,st,et,thl);
+        If rn%<>r% then
+            er$:="Warning!|Threshold crossings found does not match expected number of reps\n\nExpected ";
+            er$+=str$(r%)+" found "+str$(rn%);
+            er$+="\n\nSome or all force and EMG onset time are likely to be incorrect";
+            er$+="\n\nDo you wish to proceed anyway?\n";
+            er%:=Query(er$,"&Yes","&No"); 
+            If er% = 0 then leaveall(0); endif
+        endif
+    until rn%>0;
+    
+    winsz:=500/1000.0;  sdmul:=2;  mincross:=4/1000.0;    hyst:=0;    ' Set defaults
+    thgappre:=80/1000.0;  thgappost:=20/1000.0;    
+    smgappre:=50/1000.0;  smgappost:=50/1000.0;    
+    dlgforce();
+    er%:=DlgShow(mincross,hyst,sdmul,winsz,thgappre,thgappost,smgappre,smgappost);
+    If er% = 0 then leaveall(0); endif
+    '~~~~ Refine onset times by threshold crossing ~~~~    
+    thmkn% := MemGetItem(fonch%,0);
+    For i% := 1 to thmkn% do
+        sret:= MemGetItem(fonch%,i%)+thgappost;
+        srst:= MemGetItem(fonch%,i%)-thgappre;
+        qst:=srst-winsz;
+        qet:=srst;
+        'if stt < astt Then >>>> This needs reinstating in some form
+            'Message("Window size error!|Window too large for threshold crossing found at %g\nMaximum for this crossing would be %d",endt,endt-aendt);
+            'leaveall(0);
+        'endif    
+        ont:=findth(fch%,qst,qet,srst,sret,hyst,mincross,sdmul);
+        if ont<0 then
+            er$:="Force onset search failure (threshold)!|Failed to find force onset between "+str$(srst)+" and "+str$(sret)+"\n\nContinue?\n";
+            er%:=Query(er$,"&Yes","&No");
+            if er%=0 then 
+                leaveall(0);   
+            endif
+        else 
+            MemSetItem(fonch%,i%,ont); 
+        endif        
+    next    
+    '~~~~ Refine onset times by slope minimas ~~~~    
+    smgappre:=50/1000.0;  smgappost:=80/1000.0; ' >>>> Add this to the dialogue
+'    For i% := 1 to thmkn% do
+'        sret:= MemGetItem(fonch%,i%)+smgappost;
+'        srst:= MemGetItem(fonch%,i%)-smgappre;
+'        ont:=slopemin(fch%,srst,sret);
+'        if ont<0 then
+'            er$:="Force onset search failure (slope minima)!|Failed to find force onset between "+str$(srst)+" and "+str$(sret)+"\n\nContinue?\n";
+'            er%:=Query(er$);
+'            if er%=0 then 
+'                leaveall(0);   
+'            endif
+'        else 
+'            MemSetItem(fonch%,i%,ont); 
+'        endif        
+'    next
+    return fonch%;    
+End 
+
+' ---------------------------------------------------------------------   
+Func summkcode(ch%,n%);    ' Sum event channel marker codes (Event channel and marker index)
+    Var sum%;   ' Sum of maker codes
+    Var mk%[4]; ' Array for event marker codes
+    Var i%;     ' Looping variable
+    
+    sum%:=0;
+    For i%:=1 to MemGetItem(ch%,0) do
+        MemGetItem(ch%,i%,mk%[]);
+        sum%+=mk%[n%];
+    next    
+    return (sum%);
+End    
+
+'===================================================================
+' Main routine
+'===================================================================
+Func MAIN()
+    Var v1%;	        ' Current time view number
+    Var er%:=0, er$;    ' Error codes and string for error messages
+    Var cer%;           ' Flag if error setting cursors
+    Var lab$[2];        ' Labels for cursors
+    Var i%:=0, j%;      ' Looping variables
+    Var evch%[2];       ' Handles of threshold crossing event channels(0:force, 1:EMG)
+    Var thchbin%:=0;    ' Flag if there were issues with finding events
+    Var astt,aendt;     ' Start and end times of window to analyse
+    Var pch%;           ' Channel for processing
+    Var reps%:=3;       ' Expected number of repetitions per channel
+    
+    ToolbarText("Running script " + view(app(3)).WindowTitle$());    
+    ' ~~~~ Get a time view to work with ~~~~
+    v1%:=gettime(); 
+    View(v1%);
+    PrintLog("\n--------------------------------------------------\nOpened file %s for analysis\n",Windowtitle$());    
+    WindowVisible(3);    
+    
+    ' ~~~~ Get channels ~~~~
+    repeat
+        er%:= getch();
+    until er%=1;    
+    PrintLog("\nChannels selected for analysis:\n");
+    PrintLog("\tEMG:\tCh %d: %s\n\tForce:\tCh %d: %s\n\n",chsel%[0],ChanTitle$(chsel%[0]),chsel%[1],ChanTitle$(chsel%[1]));        
+    ' ~~~~ Get start and end times and number of reps ~~~~
+    ChanHide(-1);  
+    For i%:=0 to len(chsel%[])-1 do
+        ChanShow(chsel%[i%]);
+    next    
+    aendt:= dlgstet(chsel%[]);  
+    er%:=DlgShow(astt,aendt,reps%);
+    If er% = 0 Then leaveall(0); EndIf
+    evch%[0]:=doforce%(chsel%[1],astt,aendt,reps%);     '~~~~ Analyse force channel ~~~~
+    evch%[1]:=dotkeo%(evch%[0],chsel%[0],astt,aendt);   '~~~~ Analyse EMG channel ~~~~
+    '>>>> DONE TO HERE- but only within main for sub-routines from call to tkeo <<<<<
+    er%:=Query("Analysis complete|Analysis completed!\n\nDo you wish to set cursors?","&Set Cursors","S&kip");
+    if er%=1 then 
+        lab$[0]:="F: ";  lab$[1]:="E: ";
+        cer%:=setcursors(evch%[],lab$[]);    
+        if cer%<0 then Message("Cursor setting error!|Unable to set all cursors");   endif
+    else    
+        FrontView(loghandle());
+        view(v1%);
+    endif
+    er%:=logresult(evch%[]);
+    if er%=-1 then Message("Results output error!|Unable to write results to log window\n\nIncompatible channel type(s) passed\n"); endif
+    er%:=summkcode(evch%[1],0);
+    if er%>0  then
+        leaveall(0);    ' There were problems
+    else
+        leaveall(1);     
+    endif    
+End
+
+'================== Start of script initiation process ===========================================================
+PrintLog("\n\n===================================================================================================\n");
+PrintLog("Running: %s \t\tStarted at: %s\t%s\n",view(app(3)).WindowTitle$(),Time$(1,7,0,":"),Date$(2,3,3,2," "));
+PrintLog("Script written by: %s\n",author$);
+PrintLog("===================================================================================================\n");
+main();	' Gets the thing going!!!
