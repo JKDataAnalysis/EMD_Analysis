@@ -1,13 +1,13 @@
-# EMD_Analysis
+<h1>EMD_Analysis</h1>
 Script to measure electrical mechanical delay (EMG onset - Force onset)
 Written in the language used by the DAQ (CED Spike)
 
-
-     1  Note on the use of this script
-A substantial amount of time and effort has been put into the development of this script and it is being offered free to use by anyone within the research community. However, it is expected that anyone making use of it acknowledges that in an appropriate manner, e.g. if you publish research for which this script's use has played a substantial role in the analysis of the data, then it asked that the scripts author, Dr Jon Kelly is included in the papers list of authors. If the script as provided plays a more minor role, for example, if you substantially modified it or only minor parts of the data were analysed with it, an acknowledgement is still appreciated.
+<h4>Note on the use of this script</h4>
+<i>A substantial amount of time and effort has been put into the development of this script and it is being offered free to use by anyone within the research community. However, it is expected that anyone making use of it acknowledges that in an appropriate manner, e.g. if you publish research for which this script's use has played a substantial role in the analysis of the data, then it asked that the scripts author, Dr Jon Kelly is included in the papers list of authors. If the script as provided plays a more minor role, for example, if you substantially modified it or only minor parts of the data were analysed with it, an acknowledgement is still appreciated.
 The script is being made available out of good will to fellow researchers, please don't abuse that.
-If you have queries or requests for the scripts development or would like to do some work on its development, please contact the scripts author on: jon.kelly@ed.ac.uk
-     2  Overview of the scripts operation
+If you have queries or requests for the scripts development or would like to do some work on its development, please contact the scripts author on: <a href=mailto:jon.kelly@tuta.io>jon.kelly@tuta.io</a></i>
+     
+<h2>Overview of the scripts operation</h2>
 Notes
     • This guide is intended for researchers with existing knowledge in the area of EMG analysis and so commonly used terms and concepts in this field are not explained. Other texts should be referred to where any clarification is required.
 Settings
