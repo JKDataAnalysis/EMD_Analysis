@@ -6,17 +6,28 @@ Written in the language used by the DAQ (CED Spike)
 <i>A substantial amount of time and effort has been put into the development of this script and it is being offered free to use by anyone within the research community. However, it is expected that anyone making use of it acknowledges that in an appropriate manner, e.g. if you publish research for which this script's use has played a substantial role in the analysis of the data, then it asked that the scripts author, Dr Jon Kelly is included in the papers list of authors. If the script as provided plays a more minor role, for example, if you substantially modified it or only minor parts of the data were analysed with it, an acknowledgement is still appreciated.
 The script is being made available out of good will to fellow researchers, please don't abuse that.
 If you have queries or requests for the scripts development or would like to do some work on its development, please contact the scripts author on: <a href=mailto:jon.kelly@tuta.io>jon.kelly@tuta.io</a></i>
+
+<h2>Note</h2>
+This guide is intended for researchers with existing knowledge in the area of EMG analysis and so commonly used terms and concepts in this field are not explained. Other texts should be referred to where any clarification is required.
      
 <h2>Overview of the scripts operation</h2>
-Notes
-    • This guide is intended for researchers with existing knowledge in the area of EMG analysis and so commonly used terms and concepts in this field are not explained. Other texts should be referred to where any clarification is required.
-Settings
-    • The values in the default settings file provided with this script should work well with most data and these are automatically loaded when the script is started provided the settings file is correctly named and in the same folder as the script. 
-    • Custom settings file can be created and loaded from within the script. 
-    • If different default settings are required, then a modified settings file can be used to replace the original by simply saving in the same folder with the default file name (EMDCalcDefStn.txt). Users are strongly advised to keep a copy of the original default settings file elsewhere.
-    • For detailed explanation of settings, please refer to Appendix i in the User Guide.
-Force onset detection
-Force onsets are determined from a 3 stage process;
-     1  Approximate force onsets are found by searching for the times when the force recorded exceeds a threshold value. This value is established by scanning at progressively lower thresholds to find the minimum that can be set whilst still finding the correct number of threshold crossings.
-     
-    
+This script is written to calculate electromechanicla delay i.e. the time difference between the onset of muscle electrical activity as recorded by electromyography (EMG) and the onset of the force from the resulting contraction. Very small delays (around 10ms) between muscle activation and force production can be clinically relevant.
+
+This script is designed to be used on data where force and EMG are measured together within .smr data files from a CED DAQ based data collection setup.
+
+<h3>Stage 1:  Identify force onset</h3>
+ This is performed in 3 passes;
+<ol>
+     <li>This establishes approximate onset times by searching for threshold crossings. Repeatedly lower crossing threshold are set to establish the lowest threshold that can be set and return the expected number of repetitions of the contractios. These initial thresholds are intended only to give plausible time windows in which to perform more sensitive searched for force onsets which makes these searches less sensitive to noise.</li>
+     <li>The second stage is to work backwards from the first pass estimated onsets. Standard deviations multiples of force signal amplitudes in quiescent periods prior to each pass 1 onset are used to set thresholds and the last high-going threshold crossing prior to the pass 1 onset is take as the second pass onset time.</li>
+     <li>The final pass differentiates the force data to convert this to rate of force development (RoFD) and again use threshold crossings in a time window prior to the second pass onset times</li>
+</ol>
+<h3>Stage 2: Identify EMG onset times</h3>
+The force onset times are used to restrict the EMG search to physiologically plausible time windows prior to force onset. This reduces errors associated with noise. To make EMG activity more detacable against background noise (which can be several magnitudes larger) whilst still retaining temporal information, a time-frequency domain transform (TKEO) is performed on the EMG signal prior to analysis, which again uses threshold crossing times.
+<h4>EMD calculation</h4>
+EMD is calculated as the simple difference in time between EMG and force onset times. These data are saved to a CSV file. The script also annotates the results to indicate where it was not possible to find onsets within the defined parameters.
+
+<h2>Setting</h2>
+There are a large number of settings within the script intended to optimise its performance. The values in the default settings file are expected to work well with most data but it is likely that researchers will need to spend some time refining these to their particular data set to achieve optimal results.
+Custom settings file can be created and loaded from within the script. If different default settings are required, then a modified settings file can be used to replace the original by simply saving in the same folder with the default file name (EMDCalcDefStn.txt). Users are strongly advised to keep a copy of the original default settings file elsewhere.
+<!-- Add information from settings 2 file -->
