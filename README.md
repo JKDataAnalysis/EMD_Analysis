@@ -7,8 +7,6 @@
 <p>The script is being made available out of good will to fellow researchers, please don't abuse that.
 If you have queries or requests for the scripts development or would like to do some work on its development, please contact the scripts author on: <a href=mailto:jon.kelly@tuta.io>jon.kelly@tuta.io</a></i></p>
 
-<p>For a flowchart outlining the structure of the scripts, see: EMD_Calc_flowchart.pdf</p>
-
 <h2>Note</h2>
 <p>This guide is intended for researchers with existing knowledge in the area of EMG analysis and so commonly used terms and concepts in this field are not explained. Other texts should be referred to where any clarification is required.</p>
      
@@ -17,7 +15,9 @@ If you have queries or requests for the scripts development or would like to do 
 
 <p>This script is designed to be used on data where force and EMG are measured together within .smr data files from a CED DAQ based data collection setup.</p>
 
-<p>The main script is EMD_Calc_vX/s2s. The other scripts are called from this and must be saved in the same folder as the main script.</p>
+<p>The main script is EMD_Calc_v?.s2s. The other scripts are called from this and must be saved in the same folder as the main script.</p>
+
+<p>For a flowchart outlining the structure of the scripts, see: EMD_Calc_flowchart.pdf</p>
 
 <h3>Stage 1:  Identify force onset</h3>
 This is performed in 3 passes;
