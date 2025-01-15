@@ -17,6 +17,8 @@ If you have queries or requests for the scripts development or would like to do 
 
 <p>This script is designed to be used on data where force and EMG are measured together within .smr data files from a CED DAQ based data collection setup.</p>
 
+<p>The main script is EMD_Calc_vX/s2s. The other scripts are called from this and must be saved in the same folder as the main script.</p>
+
 <h3>Stage 1:  Identify force onset</h3>
 This is performed in 3 passes;
 <ol>
